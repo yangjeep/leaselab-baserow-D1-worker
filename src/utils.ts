@@ -64,7 +64,6 @@ export function baserowTypeToSQLite(baserowType: string): string {
     multiple_select: "TEXT", // JSON array
     formula: "TEXT", // Result depends on formula
     lookup: "TEXT", // Result depends on lookup
-    duration: "INTEGER", // Duration in seconds
     uuid: "TEXT",
     autonumber: "INTEGER",
     count: "INTEGER",

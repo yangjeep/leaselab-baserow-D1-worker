@@ -11,7 +11,8 @@ import { sanitizeFieldName, baserowTypeToSQLite } from "./utils";
 export async function createImageSyncRecordsTable(db: D1Database): Promise<void> {
   try {
     console.log("Creating image_sync_records table...");
-    await db.exec(`
+    // Use prepare().run() instead of exec() to avoid potential issues
+    await db.prepare(`
       CREATE TABLE IF NOT EXISTS image_sync_records (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         google_drive_file_id TEXT NOT NULL,
@@ -31,39 +32,55 @@ export async function createImageSyncRecordsTable(db: D1Database): Promise<void>
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))
       )
-    `);
+    `).run();
     console.log("image_sync_records table created/verified");
 
     // Create indexes
     console.log("Creating indexes for image_sync_records...");
-    await db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_file_id 
-      ON image_sync_records(google_drive_file_id)
-    `);
+    try {
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_file_id 
+        ON image_sync_records(google_drive_file_id)
+      `).run();
 
-    await db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_folder_id 
-      ON image_sync_records(google_drive_folder_id)
-    `);
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_folder_id 
+        ON image_sync_records(google_drive_folder_id)
+      `).run();
 
-    await db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_image_sync_r2_key 
-      ON image_sync_records(r2_key)
-    `);
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_image_sync_r2_key 
+        ON image_sync_records(r2_key)
+      `).run();
 
-    await db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_image_sync_table_row 
-      ON image_sync_records(table_id, row_id)
-    `);
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_image_sync_table_row 
+        ON image_sync_records(table_id, row_id)
+      `).run();
 
-    await db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_image_sync_status 
-      ON image_sync_records(status)
-    `);
-    console.log("Indexes created/verified");
+      await db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_image_sync_status 
+        ON image_sync_records(status)
+      `).run();
+      console.log("Indexes created/verified");
+    } catch (indexError) {
+      // Index creation errors are often non-fatal (index might already exist)
+      console.warn("Warning creating indexes (may already exist):", indexError);
+    }
   } catch (error) {
     console.error("Error creating image_sync_records table:", error);
-    throw error;
+    // Better error message - avoid accessing properties that might not exist
+    let errorMessage = "Unknown error";
+    try {
+      if (error instanceof Error) {
+        errorMessage = error.message || String(error);
+      } else {
+        errorMessage = String(error);
+      }
+    } catch {
+      errorMessage = "Error occurred but could not be serialized";
+    }
+    throw new Error(`Failed to create image_sync_records table: ${errorMessage}`);
   }
 }
 
@@ -82,7 +99,7 @@ export async function createBaserowTable(
   // Build column definitions
   const columns: string[] = [
     "id INTEGER PRIMARY KEY", // Baserow row ID
-    "order TEXT", // Baserow order field
+    "\"order\" TEXT", // Baserow order field (escaped because order is a reserved keyword)
   ];
 
   // Add columns for each field
@@ -102,13 +119,13 @@ export async function createBaserowTable(
     )
   `;
 
-  await db.exec(createTableSQL);
+  await db.prepare(createTableSQL).run();
 
   // Create index on id
-  await db.exec(`
+  await db.prepare(`
     CREATE INDEX IF NOT EXISTS idx_${sanitizedTableName}_id 
     ON ${sanitizedTableName}(id)
-  `);
+  `).run();
 }
 
 /**

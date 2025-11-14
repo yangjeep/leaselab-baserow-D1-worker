@@ -9,6 +9,7 @@ export interface Env {
   GOOGLE_SERVICE_ACCOUNT_JSON?: string;
   BASEROW_API_TOKEN?: string;
   BASEROW_DATABASE_ID?: string;
+  BASEROW_TABLE_ID?: string;
   WEBHOOK_SECRET?: string;
   SYNC_SECRET?: string;
   MAX_IMAGE_WIDTH?: string;

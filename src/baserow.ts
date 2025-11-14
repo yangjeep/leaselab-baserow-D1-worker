@@ -30,10 +30,21 @@ async function baserowRequest<T>(
   const apiBase = getBaserowApiBase(env);
   const url = `${apiBase}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
 
+  console.log("Baserow API request:", {
+    url,
+    hasToken: !!env.BASEROW_API_TOKEN,
+    tokenLength: env.BASEROW_API_TOKEN?.length,
+    tokenPrefix: env.BASEROW_API_TOKEN?.substring(0, 10) + "...",
+  });
+
+  // Always use Token format for Database Token
+  const authHeader = `Token ${env.BASEROW_API_TOKEN}`;
+  console.log("Using auth format: Token (Database Token)");
+
   const response = await fetch(url, {
     ...options,
     headers: {
-      Authorization: `Token ${env.BASEROW_API_TOKEN}`,
+      Authorization: authHeader,
       "Content-Type": "application/json",
       ...options.headers,
     },
@@ -56,24 +67,84 @@ async function baserowRequest<T>(
 
 /**
  * Fetch all tables in a database
+ * If Backend API is not available, return empty array (tables will be discovered via webhooks)
  */
 export async function fetchTables(env: Env, databaseId: number): Promise<BaserowTable[]> {
-  const tables = await baserowRequest<BaserowTable[]>(
-    env,
-    `/database/tables/database/${databaseId}/`
-  );
-  return tables;
+  try {
+    const tables = await baserowRequest<BaserowTable[]>(
+      env,
+      `/database/tables/database/${databaseId}/`
+    );
+    return tables;
+  } catch (error) {
+    // If Backend API is not available with Database Token, return empty
+    // Tables will be discovered via webhooks or need to be specified
+    console.log("Cannot fetch tables via API (Backend API requires JWT token)");
+    console.log("For initial sync, tables will need to be discovered via webhooks");
+    return [];
+  }
 }
 
 /**
  * Fetch all fields for a table
+ * If Backend API is not available, infer fields from row data
  */
 export async function fetchFields(env: Env, tableId: number): Promise<BaserowField[]> {
-  const fields = await baserowRequest<BaserowField[]>(
-    env,
-    `/database/fields/table/${tableId}/`
-  );
-  return fields;
+  try {
+    const fields = await baserowRequest<BaserowField[]>(
+      env,
+      `/database/fields/table/${tableId}/`
+    );
+    return fields;
+  } catch (error) {
+    // If Backend API is not available, infer fields from first row
+    console.log("Cannot fetch fields via API, inferring from row data");
+    const rowsResponse = await fetchRows(env, tableId, { size: 1, user_field_names: true });
+    if (rowsResponse.results.length === 0) {
+      throw new Error(`Cannot infer fields: table ${tableId} has no rows`);
+    }
+    
+    const firstRow = rowsResponse.results[0];
+    const inferredFields: BaserowField[] = [];
+    let fieldId = 1;
+    
+    // Infer fields from row keys (excluding id and order)
+    for (const [key, value] of Object.entries(firstRow)) {
+      if (key !== 'id' && key !== 'order') {
+        inferredFields.push({
+          id: fieldId++,
+          name: key,
+          type: inferFieldType(value),
+          table: tableId,
+          order: fieldId,
+        });
+      }
+    }
+    
+    return inferredFields;
+  }
+}
+
+/**
+ * Infer Baserow field type from value
+ */
+function inferFieldType(value: any): string {
+  if (value === null || value === undefined) {
+    return 'text'; // Default for null values
+  }
+  if (typeof value === 'boolean') {
+    return 'boolean';
+  }
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? 'number' : 'number';
+  }
+  if (Array.isArray(value)) {
+    return 'multiple_select'; // or could be link_row
+  }
+  if (typeof value === 'object') {
+    return 'file'; // Could be file field
+  }
+  return 'text'; // Default to text
 }
 
 /**

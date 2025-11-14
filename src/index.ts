@@ -6,7 +6,7 @@
 import type { Env, BaserowWebhookPayload, BaserowRow, BaserowField } from "./types";
 import { jsonResponse, getEnvString } from "./utils";
 import { verifyWebhookSignature } from "./auth";
-import { fetchTables, fetchFields, fetchAllRows } from "./baserow";
+import { fetchTables, fetchFields, fetchAllRows, fetchRows } from "./baserow";
 import {
   createBaserowTable,
   getTableName,
@@ -383,7 +383,7 @@ async function syncRowToD1(
   fields: BaserowField[]
 ): Promise<void> {
   try {
-    const columns: string[] = ["id", "order"];
+    const columns: string[] = ["id", "\"order\""];
     const values: any[] = [row.id, row.order];
 
     const placeholders: string[] = ["?", "?"];
@@ -455,9 +455,47 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
     // Initialize schema
     await initializeSchema(env.D1_DATABASE);
 
-    // Fetch all tables
-    const tables = await fetchTables(env, databaseId);
-    console.log(`Found ${tables.length} tables`);
+    // Sync table from environment variable (skip table fetching - Database Token doesn't support Backend API)
+    if (!env.BASEROW_TABLE_ID) {
+      return jsonResponse({
+        success: false,
+        error: "BASEROW_TABLE_ID not configured",
+        timestamp,
+      }, 400);
+    }
+    
+    const tableId = parseInt(env.BASEROW_TABLE_ID);
+    if (isNaN(tableId)) {
+      return jsonResponse({
+        success: false,
+        error: `Invalid BASEROW_TABLE_ID: ${env.BASEROW_TABLE_ID}`,
+        timestamp,
+      }, 400);
+    }
+    
+    console.log(`Syncing table ${tableId} directly`);
+    
+    // Verify table is accessible by fetching a row
+    let testRows;
+    try {
+      testRows = await fetchRows(env, tableId, { size: 1, user_field_names: true });
+      console.log(`Table ${tableId} accessible, row count: ${testRows.count}`);
+    } catch (error) {
+      console.error(`Table ${tableId} access error:`, error instanceof Error ? error.message : String(error));
+      return jsonResponse({
+        success: false,
+        error: `Cannot access table ${tableId}: ${error instanceof Error ? error.message : "Unknown error"}`,
+        timestamp,
+      }, 400);
+    }
+    
+    // Create table object for sync
+    const tables = [{
+      id: tableId,
+      name: `table_${tableId}`, // We don't know the name, use ID
+      order: 0,
+      database: databaseId,
+    }];
 
     const summary = {
       tablesProcessed: tables.length,
@@ -474,8 +512,9 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
     // Process each table
     for (const table of tables) {
       try {
-        // Fetch fields
+        // Fetch fields (will infer from row data if Backend API not available)
         const fields = await fetchFields(env, table.id);
+        console.log(`Table ${table.id}: ${fields.length} fields`);
         const imageFields = fields.filter(
           (f) => f.name.toLowerCase().includes("image") || f.type === "file"
         );
