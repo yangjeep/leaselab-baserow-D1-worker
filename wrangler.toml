@@ -3,6 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2024-11-13"
 
 # Production Environment (default)
+# D1 Database Binding
+[[d1_databases]]
+binding = "D1_DATABASE"
+database_name = "baserow-sync"
+database_id = ""  # Will be created with: npx wrangler d1 create baserow-sync
+
 # R2 Bucket Binding
 [[r2_buckets]]
 binding = "R2_BUCKET"
@@ -25,8 +31,9 @@ crons = ["0 * * * *"]  # Default: Every hour
 # Secrets (add via: npx wrangler secret put SECRET_NAME)
 # Required:
 # - GOOGLE_DRIVE_API_KEY (or GOOGLE_SERVICE_ACCOUNT_JSON)
-# - AIRTABLE_TOKEN
-# - AIRTABLE_BASE_ID
+# - BASEROW_API_TOKEN (Baserow API authentication token)
+# - BASEROW_DATABASE_ID (Database ID, default: 321013)
+# - WEBHOOK_SECRET (Secret for Baserow webhook verification)
 # - SYNC_SECRET (required for securing manual trigger endpoint - Bearer token authentication)
 
 # Observability Configuration
@@ -41,6 +48,12 @@ persist = true
 [env.demo]
 name = "rental-manager-image-sync-demo"
 
+# D1 Database Binding for Demo
+[[env.demo.d1_databases]]
+binding = "D1_DATABASE"
+database_name = "baserow-sync-demo"
+database_id = ""  # Will be created with: npx wrangler d1 create baserow-sync-demo --env demo
+
 # R2 Bucket Binding for Demo
 [[env.demo.r2_buckets]]
 binding = "R2_BUCKET"
@@ -53,8 +66,9 @@ crons = ["0 * * * *"]  # Default: Every hour
 # Secrets for demo (add via: npx wrangler secret put SECRET_NAME --env demo)
 # Required:
 # - GOOGLE_DRIVE_API_KEY (or GOOGLE_SERVICE_ACCOUNT_JSON)
-# - AIRTABLE_TOKEN
-# - AIRTABLE_BASE_ID
+# - BASEROW_API_TOKEN (Baserow API authentication token)
+# - BASEROW_DATABASE_ID (Database ID, default: 321013)
+# - WEBHOOK_SECRET (Secret for Baserow webhook verification)
 # - SYNC_SECRET (required for securing manual trigger endpoint - Bearer token authentication)
 
 # Observability Configuration for Demo
