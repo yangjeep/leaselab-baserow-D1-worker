@@ -492,7 +492,7 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
     // Create table object for sync
     const tables = [{
       id: tableId,
-      name: `table_${tableId}`, // We don't know the name, use ID
+      name: String(tableId), // Use table ID as name (getTableName will add table_ prefix)
       order: 0,
       database: databaseId,
     }];
