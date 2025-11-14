@@ -18,12 +18,12 @@ Cloudflare Worker that synchronizes Baserow database tables to Cloudflare D1 and
 Before deploying the worker, ensure you have:
 
 1. **Cloudflare D1 Database** created and configured
-   - Production: `baserow-sync`
-   - Demo: `baserow-sync-demo`
-   - Create with: `npx wrangler d1 create baserow-sync`
+   - Production: `rio-baserow-core`
+   - Demo: `rio-baserow-core-demo`
+   - Create with: `npx wrangler d1 create riocore`
 2. **Cloudflare R2 Buckets** created and configured
-   - Production: `rental-manager-images`
-   - Demo: `rental-manager-demo-images`
+   - Production: `rio-images`
+   - Demo: `rio-images-demo`
 3. **Google Drive API Key**
    - The Drive folders must be set to "Anyone with the link can view"
 4. **Baserow Database** with:
@@ -35,8 +35,8 @@ Before deploying the worker, ensure you have:
 
 The worker supports two environments:
 
-- **Production** (default): Uses `baserow-sync` D1 database and `rental-manager-images` R2 bucket
-- **Demo**: Uses `baserow-sync-demo` D1 database and `rental-manager-demo-images` R2 bucket
+- **Production** (default): Uses `rio-baserow-core` D1 database and `rio-images` R2 bucket
+- **Demo**: Uses `rio-baserow-core-demo` D1 database and `rio-images-demo` R2 bucket
 
 Each environment has its own:
 - Worker deployment (separate URLs)
@@ -57,20 +57,28 @@ npm install
 
 **For Production:**
 ```bash
-npx wrangler d1 create baserow-sync
+npx wrangler d1 create riocore
 ```
 
 Copy the `database_id` from the output and update `wrangler.toml`:
 ```toml
 [[d1_databases]]
 binding = "D1_DATABASE"
-database_name = "baserow-sync"
+database_name = "rio-baserow-core"
 database_id = "your-database-id-here"
 ```
 
 **For Demo:**
 ```bash
-npx wrangler d1 create baserow-sync-demo --env demo
+npx wrangler d1 create riocore-demo --env demo
+```
+
+Copy the `database_id` from the output and update `wrangler.toml`:
+```toml
+[[env.demo.d1_databases]]
+binding = "D1_DATABASE"
+database_name = "rio-baserow-core-demo"
+database_id = "your-database-id-here"
 ```
 
 Update `wrangler.toml` with the demo database ID.
@@ -199,12 +207,12 @@ After deployment, note the Worker URL from the output:
 
 **Production:**
 ```
-✨  Deployed to https://rental-manager-image-sync.dwx-rental.workers.dev
+✨  Deployed to https://rental-manager-image-sync-demo.workers.dev
 ```
 
 **Demo:**
 ```
-✨  Deployed to https://rental-manager-image-sync-demo.dwx-rental.workers.dev
+✨  Deployed to https://rio-baserow-demo.workers.dev
 ```
 
 **Endpoints:**
@@ -230,14 +238,14 @@ Trigger a full database sync manually via HTTP:
 ```bash
 # Authentication is required - Bearer token must be provided
 curl -H "Authorization: Bearer your-secret-here" \
-  https://rental-manager-image-sync.dwx-rental.workers.dev/sync
+  https://rental-manager-image-sync-demo.workers.dev/sync
 ```
 
 **Demo:**
 ```bash
 # Authentication is required - Bearer token must be provided
 curl -H "Authorization: Bearer your-secret-here" \
-  https://rental-manager-image-sync-demo.dwx-rental.workers.dev/sync
+  https://rio-baserow-demo.workers.dev/sync
 ```
 
 **Response:**
@@ -370,8 +378,8 @@ After a sync, verify data is in your D1 database:
 
 1. Go to Cloudflare Dashboard → D1
 2. Select your database:
-   - Production: `baserow-sync`
-   - Demo: `baserow-sync-demo`
+   - Production: `rio-baserow-core`
+   - Demo: `rio-baserow-core-demo`
 3. Run queries to check synced tables and image records
 
 ### Verify Images in R2
@@ -380,8 +388,8 @@ After a sync, verify images are in your R2 bucket:
 
 1. Go to Cloudflare Dashboard → R2
 2. Select your bucket:
-   - Production: `rental-manager-images`
-   - Demo: `rental-manager-demo-images`
+   - Production: `rio-images`
+   - Demo: `rio-images-demo`
 3. Navigate to a table/row folder (e.g., `740124/12345/`)
 4. You should see all uploaded images with their original filenames
 5. Check object metadata to see stored hashes
@@ -463,7 +471,7 @@ After a sync, verify images are in your R2 bucket:
 
 After deploying the worker:
 
-1. ✅ **Create D1 databases** - Run `npx wrangler d1 create baserow-sync`
+1. ✅ **Create D1 databases** - Run `npx wrangler d1 create riocore` (production) and `npx wrangler d1 create riocore-demo --env demo` (demo)
 2. ✅ **Configure secrets** - Set all required secrets
 3. ✅ **Configure Baserow webhook** - Add webhook URL in Baserow settings
 4. ✅ **Test manual sync** - Run sync on-demand to verify setup
