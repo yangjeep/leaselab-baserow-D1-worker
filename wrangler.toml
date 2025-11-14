@@ -1,4 +1,4 @@
-name = "rental-manager-image-sync-demo"
+name = "leaselab-rowbase-rio-sync-worker"
 main = "src/index.ts"
 compatibility_date = "2024-11-13"
 
@@ -7,7 +7,7 @@ compatibility_date = "2024-11-13"
 [[d1_databases]]
 binding = "D1_DATABASE"
 database_name = "rio-baserow-core"
-database_id = ""  # Will be created with: npx wrangler d1 create riocore
+database_id = "beace8f5-e60e-4071-b018-d93d8a2cae9b" 
 
 # R2 Bucket Binding
 [[r2_buckets]]
@@ -39,25 +39,26 @@ crons = ["0 * * * *"]  # Default: Every hour
 # Observability Configuration
 [observability]
 [observability.logs]
-enabled = false
+enabled = true
 head_sampling_rate = 1
 invocation_logs = true
 persist = true
 
 # Demo Environment
 [env.demo]
-name = "rio-baserow-demo"
+name = "leaselab-rowbase-rio-sync-worker-demo"
 
 # D1 Database Binding for Demo
 [[env.demo.d1_databases]]
 binding = "D1_DATABASE"
 database_name = "rio-baserow-core-demo"
-database_id = ""  # Will be created with: npx wrangler d1 create baserow-sync-demo --env demo
+database_id = "9d5ca81c-257f-4d51-aa20-eaeb88ea9d65"  
 
 # R2 Bucket Binding for Demo
-[[env.demo.r2_buckets]]
-binding = "R2_BUCKET"
-bucket_name = "rio-images-demo"
+# Commented out until bucket is created
+# [[env.demo.r2_buckets]]
+# binding = "R2_BUCKET"
+# bucket_name = "rio-images-demo"
 
 # Cron Triggers for Demo
 [env.demo.triggers]

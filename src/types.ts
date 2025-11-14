@@ -4,7 +4,7 @@
 
 export interface Env {
   D1_DATABASE: D1Database;
-  R2_BUCKET: R2Bucket;
+  R2_BUCKET?: R2Bucket;
   GOOGLE_DRIVE_API_KEY?: string;
   GOOGLE_SERVICE_ACCOUNT_JSON?: string;
   BASEROW_API_TOKEN?: string;

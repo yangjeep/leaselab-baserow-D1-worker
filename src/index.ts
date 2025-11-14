@@ -5,7 +5,7 @@
 
 import type { Env, BaserowWebhookPayload, BaserowRow, BaserowField } from "./types";
 import { jsonResponse, getEnvString } from "./utils";
-import { verifyAndParseWebhook } from "./auth";
+import { verifyWebhookSignature } from "./auth";
 import { fetchTables, fetchFields, fetchAllRows } from "./baserow";
 import {
   createBaserowTable,
@@ -19,43 +19,75 @@ import { sanitizeFieldName } from "./utils";
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Handle CORS preflight
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Baserow-Signature",
-        },
+    try {
+      console.log("Worker fetch handler called", {
+        method: request.method,
+        url: request.url,
       });
-    }
-
-    const url = new URL(request.url);
-
-    // Webhook endpoint for Baserow
-    if (url.pathname === "/webhook" && request.method === "POST") {
-      return handleWebhook(request, env, ctx);
-    }
-
-    // Sync endpoint
-    if (url.pathname === "/sync" || url.pathname === "/") {
-      // Require SYNC_SECRET to be configured
-      if (!env.SYNC_SECRET) {
-        return jsonResponse({ error: "SYNC_SECRET not configured" }, 500);
+      
+      // Handle CORS preflight
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Baserow-Signature",
+          },
+        });
       }
 
-      // Validate Bearer token - authentication is required
-      const authHeader = request.headers.get("Authorization");
-      if (authHeader !== `Bearer ${env.SYNC_SECRET}`) {
-        return jsonResponse({ error: "Unauthorized" }, 401);
+      let url: URL;
+      try {
+        url = new URL(request.url);
+        console.log("URL parsed", { pathname: url.pathname });
+      } catch (urlError) {
+        console.error("Failed to parse URL:", urlError);
+        return jsonResponse({ error: "Invalid URL" }, 400);
       }
 
-      if (request.method === "GET" || request.method === "POST") {
-        return handleFullSync(env, ctx);
+      // Health check endpoint - simplest possible
+      if (url.pathname === "/health" || (url.pathname === "/" && request.method === "GET")) {
+        return new Response(JSON.stringify({ status: "ok" }), {
+          headers: { "Content-Type": "application/json" },
+        });
       }
+
+      // Webhook endpoint for Baserow
+      if (url.pathname === "/webhook" && request.method === "POST") {
+        console.log("Webhook endpoint matched");
+        return await handleWebhook(request, env, ctx);
+      }
+
+      // Sync endpoint
+      if (url.pathname === "/sync") {
+        // Require SYNC_SECRET to be configured
+        if (!env.SYNC_SECRET) {
+          return jsonResponse({ error: "SYNC_SECRET not configured" }, 500);
+        }
+
+        // Validate Bearer token - authentication is required
+        const authHeader = request.headers.get("Authorization");
+        if (authHeader !== `Bearer ${env.SYNC_SECRET}`) {
+          return jsonResponse({ error: "Unauthorized" }, 401);
+        }
+
+        if (request.method === "GET" || request.method === "POST") {
+          return await handleFullSync(env, ctx);
+        }
+      }
+
+      return jsonResponse({ error: "Not found" }, 404);
+    } catch (error) {
+      console.error("Unhandled error in fetch handler:", error);
+      return jsonResponse(
+        {
+          error: "Internal server error",
+          details: error instanceof Error ? error.message : "Unknown error",
+          stack: error instanceof Error ? error.stack : undefined,
+        },
+        500
+      );
     }
-
-    return jsonResponse({ error: "Not found" }, 404);
   },
 
   // Cron trigger handler
@@ -79,26 +111,81 @@ async function handleWebhook(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
+  console.log("=== WEBHOOK HANDLER START ===");
+  console.log("Method:", request.method);
+  console.log("URL:", request.url);
+  
+  // Log headers safely
+  const headers: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    headers[key] = value;
+  });
+  console.log("Headers:", JSON.stringify(headers));
+  
   try {
-    const { verified, body } = await verifyAndParseWebhook<BaserowWebhookPayload>(
-      request,
-      env
-    );
-
-    if (!verified) {
-      return jsonResponse({ error: "Invalid webhook signature" }, 401);
+    // Read body once
+    const bodyText = await request.text();
+    console.log("Body received, length:", bodyText.length);
+    
+    // Parse body
+    let body: BaserowWebhookPayload;
+    try {
+      body = JSON.parse(bodyText) as BaserowWebhookPayload;
+      console.log("Body parsed:", { event_type: body.event_type, table_id: body.table_id });
+    } catch (parseError) {
+      console.error("Failed to parse body:", parseError);
+      return jsonResponse(
+        {
+          error: "Failed to parse webhook body",
+          details: parseError instanceof Error ? parseError.message : "Unknown error",
+        },
+        400
+      );
     }
 
-    // Process webhook asynchronously
-    ctx.waitUntil(processWebhook(body, env));
+    // Validate webhook payload
+    if (!body.event_type) {
+      return jsonResponse({ error: "Missing event_type in webhook payload" }, 400);
+    }
 
-    // Return immediate response
-    return jsonResponse({ received: true, event_type: body.event_type });
+    // Verify signature (skip if no secret configured)
+    if (env.WEBHOOK_SECRET) {
+      const signature = request.headers.get("X-Baserow-Signature");
+      const verified = await verifyWebhookSignature(
+        bodyText,
+        signature,
+        env
+      );
+      if (!verified) {
+        console.warn("Signature verification failed");
+        return jsonResponse({ error: "Invalid webhook signature" }, 401);
+      }
+      console.log("Signature verified");
+    } else {
+      console.log("WEBHOOK_SECRET not configured, skipping signature verification");
+    }
+
+    // Process webhook asynchronously (don't wait)
+    ctx.waitUntil(
+      processWebhook(body, env).catch((error) => {
+        console.error("Error in async webhook processing:", error);
+      })
+    );
+
+    // Return immediate success response
+    console.log("=== WEBHOOK HANDLER SUCCESS ===");
+    return jsonResponse({ 
+      received: true, 
+      event_type: body.event_type,
+      table_id: body.table_id,
+    });
   } catch (error) {
-    console.error("Webhook error:", error);
+    console.error("=== WEBHOOK HANDLER ERROR ===", error);
     return jsonResponse(
       {
-        error: error instanceof Error ? error.message : "Unknown error",
+        error: "Internal server error",
+        details: error instanceof Error ? error.message : "Unknown error",
+        stack: error instanceof Error ? error.stack : undefined,
       },
       500
     );
@@ -110,7 +197,31 @@ async function handleWebhook(
  */
 async function processWebhook(payload: BaserowWebhookPayload, env: Env): Promise<void> {
   try {
+    console.log("processWebhook: starting", { event_type: payload.event_type, table_id: payload.table_id });
+    
+    // Validate required environment variables
+    if (!env.D1_DATABASE) {
+      throw new Error("D1_DATABASE not configured");
+    }
+
+    if (!env.BASEROW_API_TOKEN) {
+      console.warn("BASEROW_API_TOKEN not configured, skipping webhook processing");
+      return;
+    }
+
+    // Verify D1 database is accessible
+    try {
+      console.log("processWebhook: testing D1 database connection");
+      await env.D1_DATABASE.prepare("SELECT 1").first();
+      console.log("processWebhook: D1 database connection verified");
+    } catch (dbError) {
+      console.error("processWebhook: D1 database connection failed:", dbError);
+      throw new Error(`D1 database not accessible: ${dbError instanceof Error ? dbError.message : "Unknown error"}`);
+    }
+
+    console.log("processWebhook: initializing schema");
     await initializeSchema(env.D1_DATABASE);
+    console.log("processWebhook: schema initialized");
 
     if (payload.event_type === "rows.created" && payload.items) {
       await handleRowsCreated(payload.items, payload.table_id, env);
@@ -118,9 +229,13 @@ async function processWebhook(payload: BaserowWebhookPayload, env: Env): Promise
       await handleRowsUpdated(payload.items, payload.old_items || [], payload.table_id, env);
     } else if (payload.event_type === "rows.deleted" && payload.row_ids) {
       await handleRowsDeleted(payload.row_ids, payload.table_id, env);
+    } else {
+      console.warn("Unknown or unsupported event type:", payload.event_type);
     }
   } catch (error) {
     console.error("Error processing webhook:", error);
+    // Re-throw to ensure it's logged in waitUntil
+    throw error;
   }
 }
 
@@ -128,22 +243,39 @@ async function processWebhook(payload: BaserowWebhookPayload, env: Env): Promise
  * Handle rows.created event
  */
 async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env): Promise<void> {
+  console.log("handleRowsCreated: starting", { tableId, itemCount: items.length });
+  
   // Get table fields to identify image fields
+  console.log("handleRowsCreated: fetching fields");
   const fields = await fetchFields(env, tableId);
+  console.log("handleRowsCreated: fields fetched", { fieldCount: fields.length });
+  
   const imageFields = fields.filter((f) =>
     f.name.toLowerCase().includes("image") || f.type === "file"
   );
+  console.log("handleRowsCreated: image fields", { count: imageFields.length });
 
   // Ensure table exists in D1
+  console.log("handleRowsCreated: fetching tables");
   const tables = await fetchTables(env, parseInt(getEnvString(env, "BASEROW_DATABASE_ID", "321013")));
   const table = tables.find((t) => t.id === tableId);
   if (!table) {
     throw new Error(`Table ${tableId} not found`);
   }
+  console.log("handleRowsCreated: table found", { tableId: table.id, tableName: table.name });
 
   const d1TableName = getTableName(tableId, table.name);
-  if (!(await tableExists(env.D1_DATABASE, d1TableName))) {
+  console.log("handleRowsCreated: D1 table name", { d1TableName });
+  
+  const exists = await tableExists(env.D1_DATABASE, d1TableName);
+  console.log("handleRowsCreated: table exists check", { exists });
+  
+  if (!exists) {
+    console.log("handleRowsCreated: creating D1 table");
     await createBaserowTable(env.D1_DATABASE, tableId, table.name, fields);
+    console.log("handleRowsCreated: D1 table created");
+  } else {
+    console.log("handleRowsCreated: D1 table already exists");
   }
 
   // Process each row

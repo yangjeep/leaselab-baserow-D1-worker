@@ -9,53 +9,62 @@ import { sanitizeFieldName, baserowTypeToSQLite } from "./utils";
  * Create the image_sync_records table if it doesn't exist
  */
 export async function createImageSyncRecordsTable(db: D1Database): Promise<void> {
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS image_sync_records (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      google_drive_file_id TEXT NOT NULL,
-      google_drive_folder_id TEXT NOT NULL,
-      r2_url TEXT,
-      r2_key TEXT,
-      table_id INTEGER NOT NULL,
-      row_id INTEGER NOT NULL,
-      field_name TEXT NOT NULL,
-      original_size INTEGER,
-      optimized_size INTEGER,
-      status TEXT NOT NULL DEFAULT 'pending',
-      processed_at TEXT,
-      error_message TEXT,
-      md5_hash TEXT,
-      file_name TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
+  try {
+    console.log("Creating image_sync_records table...");
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS image_sync_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        google_drive_file_id TEXT NOT NULL,
+        google_drive_folder_id TEXT NOT NULL,
+        r2_url TEXT,
+        r2_key TEXT,
+        table_id INTEGER NOT NULL,
+        row_id INTEGER NOT NULL,
+        field_name TEXT NOT NULL,
+        original_size INTEGER,
+        optimized_size INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        processed_at TEXT,
+        error_message TEXT,
+        md5_hash TEXT,
+        file_name TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now'))
+      )
+    `);
+    console.log("image_sync_records table created/verified");
 
-  // Create indexes
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_file_id 
-    ON image_sync_records(google_drive_file_id)
-  `);
+    // Create indexes
+    console.log("Creating indexes for image_sync_records...");
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_file_id 
+      ON image_sync_records(google_drive_file_id)
+    `);
 
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_folder_id 
-    ON image_sync_records(google_drive_folder_id)
-  `);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_image_sync_google_drive_folder_id 
+      ON image_sync_records(google_drive_folder_id)
+    `);
 
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_image_sync_r2_key 
-    ON image_sync_records(r2_key)
-  `);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_image_sync_r2_key 
+      ON image_sync_records(r2_key)
+    `);
 
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_image_sync_table_row 
-    ON image_sync_records(table_id, row_id)
-  `);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_image_sync_table_row 
+      ON image_sync_records(table_id, row_id)
+    `);
 
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_image_sync_status 
-    ON image_sync_records(status)
-  `);
+    await db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_image_sync_status 
+      ON image_sync_records(status)
+    `);
+    console.log("Indexes created/verified");
+  } catch (error) {
+    console.error("Error creating image_sync_records table:", error);
+    throw error;
+  }
 }
 
 /**
@@ -161,6 +170,13 @@ export function getTableName(tableId: number, tableName: string): string {
  * Initialize database schema (create image_sync_records table)
  */
 export async function initializeSchema(db: D1Database): Promise<void> {
-  await createImageSyncRecordsTable(db);
+  try {
+    console.log("Initializing D1 schema...");
+    await createImageSyncRecordsTable(db);
+    console.log("D1 schema initialized successfully");
+  } catch (error) {
+    console.error("Failed to initialize D1 schema:", error);
+    throw new Error(`Schema initialization failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+  }
 }
 
