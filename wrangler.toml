@@ -6,13 +6,13 @@ compatibility_date = "2024-11-13"
 # D1 Database Binding
 [[d1_databases]]
 binding = "D1_DATABASE"
-database_name = "baserow-sync"
-database_id = ""  # Will be created with: npx wrangler d1 create baserow-sync
+database_name = "rio-baserow-core"
+database_id = ""  # Will be created with: npx wrangler d1 create riocore
 
 # R2 Bucket Binding
 [[r2_buckets]]
 binding = "R2_BUCKET"
-bucket_name = "rental-manager-images"
+bucket_name = "rio-images"
 
 # Cron Triggers (scheduled sync)
 # Uncomment and adjust schedule as needed
@@ -46,18 +46,18 @@ persist = true
 
 # Demo Environment
 [env.demo]
-name = "rental-manager-image-sync-demo"
+name = "rio-baserow-demo"
 
 # D1 Database Binding for Demo
 [[env.demo.d1_databases]]
 binding = "D1_DATABASE"
-database_name = "baserow-sync-demo"
+database_name = "rio-baserow-core-demo"
 database_id = ""  # Will be created with: npx wrangler d1 create baserow-sync-demo --env demo
 
 # R2 Bucket Binding for Demo
 [[env.demo.r2_buckets]]
 binding = "R2_BUCKET"
-bucket_name = "rental-manager-demo-images"
+bucket_name = "rio-images-demo"
 
 # Cron Triggers for Demo
 [env.demo.triggers]
