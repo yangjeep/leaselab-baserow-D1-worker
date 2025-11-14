@@ -1,0 +1,21 @@
+{
+  "name": "gdrive-cfr2-image-sync",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker to sync images from Google Drive to R2",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:demo": "wrangler dev --env demo",
+    "deploy": "wrangler deploy",
+    "deploy:prod": "wrangler deploy",
+    "deploy:demo": "wrangler deploy --env demo"
+  },
+  "keywords": ["cloudflare", "worker", "r2", "google-drive"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "wrangler": "^3.84.1"
+  }
+}
+

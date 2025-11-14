@@ -1,0 +1,67 @@
+name = "rental-manager-image-sync-demo"
+main = "src/index.ts"
+compatibility_date = "2024-11-13"
+
+# Production Environment (default)
+# R2 Bucket Binding
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "rental-manager-images"
+
+# Cron Triggers (scheduled sync)
+# Uncomment and adjust schedule as needed
+# Examples:
+# - "0 * * * *" = Every hour
+# - "0 0 * * *" = Daily at midnight
+# - "0 */6 * * *" = Every 6 hours
+[triggers]
+crons = ["0 * * * *"]  # Default: Every hour
+
+# Environment Variables (non-sensitive)
+[vars]
+# Airtable configuration (can also be set as secrets for security)
+# AIRTABLE_TABLE_NAME = "Properties"  # Optional, defaults to "Properties"
+
+# Secrets (add via: npx wrangler secret put SECRET_NAME)
+# Required:
+# - GOOGLE_DRIVE_API_KEY (or GOOGLE_SERVICE_ACCOUNT_JSON)
+# - AIRTABLE_TOKEN
+# - AIRTABLE_BASE_ID
+# - SYNC_SECRET (required for securing manual trigger endpoint - Bearer token authentication)
+
+# Observability Configuration
+[observability]
+[observability.logs]
+enabled = false
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+# Demo Environment
+[env.demo]
+name = "rental-manager-image-sync-demo"
+
+# R2 Bucket Binding for Demo
+[[env.demo.r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "rental-manager-demo-images"
+
+# Cron Triggers for Demo
+[env.demo.triggers]
+crons = ["0 * * * *"]  # Default: Every hour
+
+# Secrets for demo (add via: npx wrangler secret put SECRET_NAME --env demo)
+# Required:
+# - GOOGLE_DRIVE_API_KEY (or GOOGLE_SERVICE_ACCOUNT_JSON)
+# - AIRTABLE_TOKEN
+# - AIRTABLE_BASE_ID
+# - SYNC_SECRET (required for securing manual trigger endpoint - Bearer token authentication)
+
+# Observability Configuration for Demo
+[env.demo.observability]
+[env.demo.observability.logs]
+enabled = false
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
