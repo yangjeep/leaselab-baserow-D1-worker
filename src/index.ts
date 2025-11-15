@@ -167,7 +167,7 @@ async function handleWebhook(
 
     // Process webhook asynchronously (don't wait)
     ctx.waitUntil(
-      processWebhook(body, env).catch((error) => {
+      processWebhook(body, env, ctx).catch((error) => {
         console.error("Error in async webhook processing:", error);
       })
     );
@@ -195,7 +195,7 @@ async function handleWebhook(
 /**
  * Process webhook payload
  */
-async function processWebhook(payload: BaserowWebhookPayload, env: Env): Promise<void> {
+async function processWebhook(payload: BaserowWebhookPayload, env: Env, ctx: ExecutionContext): Promise<void> {
   try {
     console.log("processWebhook: starting", { event_type: payload.event_type, table_id: payload.table_id });
     
@@ -224,9 +224,9 @@ async function processWebhook(payload: BaserowWebhookPayload, env: Env): Promise
     console.log("processWebhook: schema initialized");
 
     if (payload.event_type === "rows.created" && payload.items) {
-      await handleRowsCreated(payload.items, payload.table_id, env);
+      await handleRowsCreated(payload.items, payload.table_id, env, ctx);
     } else if (payload.event_type === "rows.updated" && payload.items) {
-      await handleRowsUpdated(payload.items, payload.old_items || [], payload.table_id, env);
+      await handleRowsUpdated(payload.items, payload.old_items || [], payload.table_id, env, ctx);
     } else if (payload.event_type === "rows.deleted" && payload.row_ids) {
       await handleRowsDeleted(payload.row_ids, payload.table_id, env);
     } else {
@@ -242,7 +242,7 @@ async function processWebhook(payload: BaserowWebhookPayload, env: Env): Promise
 /**
  * Handle rows.created event
  */
-async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env): Promise<void> {
+async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env, ctx: ExecutionContext): Promise<void> {
   console.log("handleRowsCreated: starting", { tableId, itemCount: items.length });
   
   // Get table fields to identify image fields
@@ -286,19 +286,21 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env)
       for (const field of imageFields) {
         const fieldValue = row[field.name];
         if (fieldValue && typeof fieldValue === "string" && env.R2_BUCKET) {
-          // Process images asynchronously
-          processImagesFromFolder(
-            env.D1_DATABASE,
-            env.R2_BUCKET,
-            env,
-            fieldValue,
-            tableId,
-            row.id,
-            field.name,
-            d1TableName
-          ).catch((error) => {
-            console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
-          });
+          // Process images asynchronously with waitUntil to ensure R2 writes complete
+          ctx.waitUntil(
+            processImagesFromFolder(
+              env.D1_DATABASE,
+              env.R2_BUCKET,
+              env,
+              fieldValue,
+              tableId,
+              row.id,
+              field.name,
+              d1TableName
+            ).catch((error) => {
+              console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
+            })
+          );
         }
       }
   }
@@ -311,7 +313,8 @@ async function handleRowsUpdated(
   items: BaserowRow[],
   oldItems: BaserowRow[],
   tableId: number,
-  env: Env
+  env: Env,
+  ctx: ExecutionContext
 ): Promise<void> {
   const fields = await fetchFields(env, tableId);
   const imageFields = fields.filter((f) =>
@@ -337,19 +340,21 @@ async function handleRowsUpdated(
       const oldValue = oldRow?.[field.name];
 
       if (newValue && newValue !== oldValue && typeof newValue === "string" && env.R2_BUCKET) {
-        // Process images asynchronously
-        processImagesFromFolder(
-          env.D1_DATABASE,
-          env.R2_BUCKET,
-          env,
-          newValue,
-          tableId,
-          row.id,
-          field.name,
-          d1TableName
-        ).catch((error) => {
-          console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
-        });
+        // Process images asynchronously with waitUntil to ensure R2 writes complete
+        ctx.waitUntil(
+          processImagesFromFolder(
+            env.D1_DATABASE,
+            env.R2_BUCKET,
+            env,
+            newValue,
+            tableId,
+            row.id,
+            field.name,
+            d1TableName
+          ).catch((error) => {
+            console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
+          })
+        );
       }
     }
   }
