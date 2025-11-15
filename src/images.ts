@@ -398,32 +398,14 @@ export async function processImagesFromFolder(
       const originalSize = imageData.byteLength;
       const maxImageSizeMB = (maxImageSize / (1024 * 1024)).toFixed(2);
       const originalSizeMB = (originalSize / (1024 * 1024)).toFixed(2);
-      console.log(`Checking file size for ${file.name}: ${originalSizeMB}MB (max: ${maxImageSizeMB}MB)`);
+      console.log(`Checking file size for ${file.name}: ${originalSizeMB}MB (recommended max: ${maxImageSizeMB}MB)`);
 
-      // Check file size
+      // Check file size - warn if large but proceed with aggressive optimization
       if (originalSize > maxImageSize) {
-        const errorMsg = `File size ${originalSizeMB}MB (${originalSize} bytes) exceeds maximum ${maxImageSizeMB}MB (${maxImageSize} bytes)`;
-        console.error(`Rejecting ${file.name}: ${errorMsg}`);
-        await upsertImageSyncRecord(db, {
-          google_drive_file_id: file.id,
-          google_drive_folder_id: folderId,
-          r2_url: null,
-          r2_key: null,
-          table_id: tableId,
-          row_id: rowId,
-          field_name: fieldName,
-          original_size: originalSize,
-          optimized_size: null,
-          status: "failed",
-          processed_at: new Date().toISOString(),
-          error_message: errorMsg,
-          md5_hash: file.md5Checksum || null,
-          file_name: file.name,
-        });
-        continue;
+        console.warn(`⚠️  Large image detected: ${file.name} is ${originalSizeMB}MB (exceeds recommended ${maxImageSizeMB}MB). Will apply aggressive resizing and compression.`);
+      } else {
+        console.log(`File size check passed for ${file.name}, proceeding with processing...`);
       }
-      
-      console.log(`File size check passed for ${file.name}, proceeding with processing...`);
 
       // Image optimization/compression - base settings (lower defaults)
       const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
