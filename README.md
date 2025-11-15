@@ -469,18 +469,40 @@ After a sync, verify images are in your R2 bucket:
 - `R2_PUBLIC_DOMAIN` - Public domain for R2 bucket (default: https://img.rent-in-ottawa.ca)
 - `BASEROW_API_URL` - Custom Baserow API URL (for self-hosted instances)
 
-### Image Optimization
+### Image Handling
 
-The worker uses **browser-image-compression** for automatic compression and resizing:
+**Original images are uploaded to R2 without modification.** Image processing libraries don't work reliably in Cloudflare Workers' restricted runtime.
 
-- **Supported formats**: JPEG, PNG, and WebP images
-- **Automatic resizing**: Images are resized to fit within max dimensions while maintaining aspect ratio
-- **Format conversion**: JPEG/PNG images can be converted to WebP for better compression
-- **Target file size**: Optimizes images to be under 1MB
-- **Smart quality adjustment**: Quality is automatically reduced for very large images (>20MB)
-- **Graceful fallback**: If optimization fails, images are uploaded as-is without optimization
+#### On-Demand Image Optimization
 
-**No paid services required** - all image processing runs directly in the Worker using the browser-image-compression library, which is designed to work in web environments including Cloudflare Workers.
+Use **Cloudflare Image Resizing** to serve optimized images by adding URL parameters:
+
+```
+# Original
+https://img.rent-in-ottawa.ca/740124/5/image.jpg
+
+# Resized to 800px wide, 85% quality, WebP format
+https://img.rent-in-ottawa.ca/cdn-cgi/image/width=800,quality=85,format=webp/740124/5/image.jpg
+
+# Multiple parameters
+https://img.rent-in-ottawa.ca/cdn-cgi/image/width=1200,height=800,quality=80,fit=scale-down,format=auto/740124/5/image.jpg
+```
+
+**Available Parameters:**
+- `width` - Max width in pixels
+- `height` - Max height in pixels  
+- `quality` - 1-100 (default: 85)
+- `format` - `auto`, `webp`, `avif`, `json`
+- `fit` - `scale-down`, `contain`, `cover`, `crop`, `pad`
+
+**Benefits:**
+- ✅ No upload-time processing delays
+- ✅ Serve different sizes for different devices
+- ✅ Automatic format selection (`format=auto`)
+- ✅ Images cached at edge for fast delivery
+- ✅ Original always available
+
+**Note:** Cloudflare Image Resizing requires a [paid plan](https://developers.cloudflare.com/images/image-resizing/) or can be used with your existing Cloudflare account if enabled.
 
 ## Next Steps
 

@@ -1,6 +1,6 @@
 /**
  * Image processing and R2 upload
- * Uses browser-image-compression for cross-platform compatibility
+ * Uploads original images to R2 for on-demand transformation via Cloudflare Image Resizing
  */
 
 import type { DriveFile, Env, ImageSyncRecord } from "./types";
@@ -8,7 +8,6 @@ import { extractDriveFolderId, sanitizeFieldName } from "./utils";
 import { listDriveFiles, downloadDriveFile, getAccessToken } from "./google-drive";
 import { getEnvNumber, getEnvString } from "./utils";
 import { getTableColumns } from "./schema";
-import imageCompression from "browser-image-compression";
 
 /**
  * Check if image should be converted to WebP
@@ -66,63 +65,20 @@ function calculateOptimalResizeParams(
 }
 
 /**
- * Optimize image using browser-image-compression
- * This is a lighter-weight library that works better in Workers
+ * Generate optimized image URL using Cloudflare Image Resizing
+ * This doesn't process images at upload time, but provides URLs that will be optimized on-demand
  */
-async function optimizeImage(
-  imageData: ArrayBuffer,
-  mimeType: string,
+function generateOptimizedImageUrl(
+  baseUrl: string,
   maxWidth: number,
   maxHeight: number,
   quality: number,
-  originalSize?: number
-): Promise<{ data: ArrayBuffer; mimeType: string }> {
-  try {
-    console.log(`Starting image optimization: target ${maxWidth}x${maxHeight}, quality ${quality}`);
-    
-    // Convert ArrayBuffer to Blob, then to File (required by browser-image-compression)
-    const blob = new Blob([imageData], { type: mimeType });
-    const file = new File([blob], "image.jpg", { type: mimeType });
-    
-    console.log(`Original size: ${(imageData.byteLength / 1024 / 1024).toFixed(2)}MB`);
-    
-    // Configure compression options
-    const options = {
-      maxSizeMB: 1, // Target max 1MB
-      maxWidthOrHeight: Math.max(maxWidth, maxHeight),
-      useWebWorker: false, // Workers don't support Web Workers
-      fileType: shouldConvertToWebP(mimeType) ? "image/webp" : mimeType,
-      initialQuality: quality / 100, // Convert 0-100 to 0-1
-    };
-    
-    // Compress the image
-    const compressedFile = await imageCompression(file, options);
-    
-    console.log(`Compressed size: ${(compressedFile.size / 1024 / 1024).toFixed(2)}MB`);
-    
-    // Convert back to ArrayBuffer
-    const compressedArrayBuffer = await compressedFile.arrayBuffer();
-    
-    // Check if optimization was successful
-    if (compressedArrayBuffer.byteLength < imageData.byteLength * 0.95) {
-      const reduction = Math.round((1 - compressedArrayBuffer.byteLength / imageData.byteLength) * 100);
-      console.log(`✅ Image optimized: ${imageData.byteLength} -> ${compressedArrayBuffer.byteLength} bytes (${reduction}% reduction)`);
-      return { 
-        data: compressedArrayBuffer, 
-        mimeType: compressedFile.type 
-      };
-    }
-    
-    // If not significantly smaller, return original
-    console.log(`Optimization didn't reduce size enough, using original`);
-    return { data: imageData, mimeType };
-    
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.warn(`⚠️  Image optimization failed: ${errorMsg}`);
-    console.log(`Uploading original image without optimization`);
-    return { data: imageData, mimeType };
-  }
+  format: 'auto' | 'webp' | 'avif' | 'json' = 'auto'
+): string {
+  // Cloudflare Image Resizing URL format:
+  // https://domain.com/cdn-cgi/image/width=800,height=600,quality=85,format=auto/image-path
+  const params = `width=${maxWidth},height=${maxHeight},quality=${quality},fit=scale-down,format=${format}`;
+  return baseUrl.replace(/^(https?:\/\/[^/]+)(.+)$/, `$1/cdn-cgi/image/${params}$2`);
 }
 
 /**
@@ -364,7 +320,9 @@ async function downloadAndValidateImage(
 }
 
 /**
- * Optimize image with iterative compression
+ * Skip optimization and return original image
+ * Image processing libraries don't work reliably in Cloudflare Workers
+ * Instead, use Cloudflare Image Resizing at delivery time via URL parameters
  */
 async function optimizeImageIteratively(
   file: DriveFile,
@@ -372,82 +330,11 @@ async function optimizeImageIteratively(
   originalSize: number,
   env: Env
 ): Promise<{ data: ArrayBuffer; mimeType: string; size: number }> {
-  const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
-  const baseMaxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
-  const baseQuality = getEnvNumber(env, "IMAGE_QUALITY", 85);
-  
-  // Threshold for direct upload without optimization (2MB)
-  const directUploadThreshold = 2 * 1024 * 1024;
   const sizeMB = (originalSize / (1024 * 1024)).toFixed(2);
+  console.log(`Uploading ${file.name} (${sizeMB}MB) as original - optimization will be done on-demand via Cloudflare Image Resizing`);
   
-  // For small images, skip optimization
-  if (originalSize <= directUploadThreshold) {
-    console.log(`Image ${file.name} (${sizeMB}MB) is small enough, uploading directly without optimization`);
-    return { data: imageData, mimeType: file.mimeType, size: originalSize };
-  }
-  
-  // Calculate optimal resize parameters
-  const resizeParams = calculateOptimalResizeParams(
-    originalSize,
-    baseMaxWidth,
-    baseMaxHeight,
-    baseQuality
-  );
-  
-  console.log(`Optimizing ${file.name} (${sizeMB}MB): width=${resizeParams.maxWidth}, height=${resizeParams.maxHeight}, quality=${resizeParams.quality}`);
-  
-  const targetSize = 1024 * 1024; // 1MB target
-  let currentParams = { ...resizeParams };
-  let attempts = 0;
-  const maxAttempts = 3;
-  
-  let optimizedData: ArrayBuffer;
-  let optimizedMimeType: string;
-  let optimizedSize: number;
-  
-  try {
-    do {
-      attempts++;
-      
-      const result = await optimizeImage(
-        imageData,
-        file.mimeType,
-        currentParams.maxWidth,
-        currentParams.maxHeight,
-        currentParams.quality,
-        originalSize
-      );
-      
-      optimizedData = result.data;
-      optimizedMimeType = result.mimeType;
-      optimizedSize = optimizedData.byteLength;
-      
-      // Check if we've reached target size
-      if (optimizedSize < targetSize) {
-        console.log(`Image ${file.name} optimized to ${(optimizedSize / 1024).toFixed(2)}KB (target: <1MB achieved)`);
-        break;
-      }
-      
-      // Apply more aggressive settings for next attempt
-      if (attempts < maxAttempts && optimizedSize >= targetSize) {
-        console.log(`Image ${file.name} still ${(optimizedSize / 1024 / 1024).toFixed(2)}MB after attempt ${attempts}, applying more aggressive optimization...`);
-        currentParams.maxWidth = Math.floor(currentParams.maxWidth * 0.8);
-        currentParams.maxHeight = Math.floor(currentParams.maxHeight * 0.8);
-        currentParams.quality = Math.max(60, currentParams.quality - 5);
-      } else {
-        if (optimizedSize >= targetSize) {
-          console.warn(`⚠️  Image ${file.name} is ${(optimizedSize / 1024 / 1024).toFixed(2)}MB after ${attempts} attempts (target: <1MB not achieved)`);
-        }
-        break;
-      }
-    } while (attempts < maxAttempts && optimizedSize >= targetSize);
-    
-    return { data: optimizedData, mimeType: optimizedMimeType, size: optimizedSize };
-    
-  } catch (error) {
-    console.warn(`Image optimization failed for ${file.name}, using original:`, error);
-    return { data: imageData, mimeType: file.mimeType, size: originalSize };
-  }
+  // Return original image without processing
+  return { data: imageData, mimeType: file.mimeType, size: originalSize };
 }
 
 /**
@@ -502,7 +389,23 @@ async function uploadImageToR2(
   }
 
   const r2PublicDomain = getEnvString(env, "R2_PUBLIC_DOMAIN", "https://img.rent-in-ottawa.ca");
-  const r2Url = `${r2PublicDomain}/${r2Key}`;
+  const originalUrl = `${r2PublicDomain}/${r2Key}`;
+  
+  // Generate optimized URL with Cloudflare Image Resizing parameters
+  // These URLs will serve optimized versions when Image Resizing is enabled
+  const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
+  const baseMaxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
+  const baseQuality = getEnvNumber(env, "IMAGE_QUALITY", 85);
+  
+  const r2Url = generateOptimizedImageUrl(
+    originalUrl,
+    baseMaxWidth,
+    baseMaxHeight,
+    baseQuality,
+    'auto'
+  );
+  
+  console.log(`Generated optimized URL: ${r2Url}`);
   
   return { r2Url, r2Key };
 }
