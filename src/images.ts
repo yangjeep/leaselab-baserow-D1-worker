@@ -459,18 +459,51 @@ export async function processImagesFromFolder(
         // Generate temporary key for optimization
         const tempKey = `temp/${tableId}/${rowId}/${Date.now()}-${file.id}`;
         
+        const targetSize = 1024 * 1024; // 1MB target
+        let currentParams = { ...resizeParams };
+        let attempts = 0;
+        const maxAttempts = 3; // Maximum optimization attempts
+        
         try {
-          optimizedData = await optimizeImage(
-            imageData,
-            file.mimeType,
-            resizeParams.maxWidth,
-            resizeParams.maxHeight,
-            resizeParams.quality,
-            bucket,
-            tempKey,
-            r2PublicDomain,
-            originalSize
-          );
+          do {
+            attempts++;
+            const tempKeyAttempt = `${tempKey}-attempt${attempts}`;
+            
+            optimizedData = await optimizeImage(
+              imageData,
+              file.mimeType,
+              currentParams.maxWidth,
+              currentParams.maxHeight,
+              currentParams.quality,
+              bucket,
+              tempKeyAttempt,
+              r2PublicDomain,
+              originalSize
+            );
+            
+            optimizedSize = optimizedData.byteLength;
+            
+            // Check if we've reached target size (< 1MB)
+            if (optimizedSize < targetSize) {
+              console.log(`Image ${file.name} optimized to ${(optimizedSize / 1024).toFixed(2)}KB (target: <1MB achieved)`);
+              break;
+            }
+            
+            // If still too large and we have attempts left, apply more aggressive settings
+            if (attempts < maxAttempts && optimizedSize >= targetSize) {
+              console.log(`Image ${file.name} still ${(optimizedSize / 1024 / 1024).toFixed(2)}MB after attempt ${attempts}, applying more aggressive optimization...`);
+              // Reduce dimensions by 20% and quality by 5 for next attempt
+              currentParams.maxWidth = Math.floor(currentParams.maxWidth * 0.8);
+              currentParams.maxHeight = Math.floor(currentParams.maxHeight * 0.8);
+              currentParams.quality = Math.max(60, currentParams.quality - 5);
+            } else {
+              // Max attempts reached or can't optimize further
+              if (optimizedSize >= targetSize) {
+                console.warn(`Image ${file.name} is ${(optimizedSize / 1024 / 1024).toFixed(2)}MB after ${attempts} attempts (target: <1MB not achieved)`);
+              }
+              break;
+            }
+          } while (attempts < maxAttempts && optimizedSize >= targetSize);
           
           // Check if optimization was successful and determine mime type
           if (optimizedData !== imageData) {
@@ -488,6 +521,7 @@ export async function processImagesFromFolder(
               // Optimization didn't help much, use original
               optimizedData = imageData;
               optimizedMimeType = file.mimeType;
+              optimizedSize = originalSize;
             }
           } else {
             optimizedMimeType = file.mimeType;
@@ -496,11 +530,19 @@ export async function processImagesFromFolder(
           console.warn(`Image optimization failed for ${file.name}, using original:`, error);
           optimizedData = imageData; // Fallback to original on error
           optimizedMimeType = file.mimeType;
+          optimizedSize = originalSize;
         }
         
+        // Final size check
         optimizedSize = optimizedData.byteLength;
       }
 
+      // Check if final image is suspiciously small (< 200KB) and log warning
+      const minSizeThreshold = 200 * 1024; // 200KB
+      if (optimizedSize < minSizeThreshold) {
+        console.warn(`⚠️  Warning: Image ${file.name} is very small (${(optimizedSize / 1024).toFixed(2)}KB), which may indicate an issue with optimization or the source image`);
+      }
+      
       // Generate R2 key - update extension if converted to WebP
       let sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
       if (optimizedMimeType === "image/webp" && !sanitizedFilename.toLowerCase().endsWith(".webp")) {
@@ -508,7 +550,8 @@ export async function processImagesFromFolder(
         sanitizedFilename = sanitizedFilename.replace(/\.[^.]+$/, ".webp");
       }
       const r2Key = `${tableId}/${rowId}/${sanitizedFilename}`;
-      console.log(`Uploading ${file.name} to R2 with key: ${r2Key}, size: ${optimizedSize} bytes, mimeType: ${optimizedMimeType}`);
+      const finalSizeMB = (optimizedSize / 1024 / 1024).toFixed(2);
+      console.log(`Uploading ${file.name} to R2 with key: ${r2Key}, size: ${finalSizeMB}MB (${(optimizedSize / 1024).toFixed(2)}KB), mimeType: ${optimizedMimeType}`);
 
       // Upload to R2
       const customMetadata: Record<string, string> = {
