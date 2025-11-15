@@ -9,25 +9,11 @@ import { listDriveFiles, downloadDriveFile, getAccessToken } from "./google-driv
 import { getEnvNumber, getEnvString } from "./utils";
 import { getTableColumns } from "./schema";
 import resize from "@jsquash/resize";
-import { encode as encodeJpeg } from "@jsquash/jpeg";
+import { decode as decodeJpeg, encode as encodeJpeg } from "@jsquash/jpeg";
+import { decode as decodePng } from "@jsquash/png";
 import { encode as encodeWebp } from "@jsquash/webp";
 
-// Type definitions for browser APIs available in Cloudflare Workers
-declare function createImageBitmap(blob: Blob): Promise<ImageBitmap>;
-declare class OffscreenCanvas {
-  constructor(width: number, height: number);
-  getContext(contextId: "2d"): OffscreenCanvasRenderingContext2D | null;
-  width: number;
-  height: number;
-}
-interface OffscreenCanvasRenderingContext2D {
-  drawImage(image: ImageBitmap, dx: number, dy: number): void;
-  getImageData(sx: number, sy: number, sw: number, sh: number): ImageData;
-}
-interface ImageBitmap {
-  readonly width: number;
-  readonly height: number;
-}
+// ImageData type for WASM decoders
 interface ImageData {
   readonly data: Uint8ClampedArray;
   readonly width: number;
@@ -90,24 +76,19 @@ function calculateOptimalResizeParams(
 }
 
 /**
- * Decode image from ArrayBuffer to ImageData
+ * Decode image from ArrayBuffer to ImageData using WASM-based decoders
  */
 async function decodeImage(imageData: ArrayBuffer, mimeType: string): Promise<ImageData> {
-  // Create a blob from the ArrayBuffer
-  const blob = new Blob([imageData], { type: mimeType });
+  console.log(`Decoding image with mimeType: ${mimeType}`);
   
-  // Use native browser ImageBitmap API (available in Workers)
-  const imageBitmap = await createImageBitmap(blob);
-  
-  // Create canvas and get ImageData
-  const canvas = new OffscreenCanvas(imageBitmap.width, imageBitmap.height);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Failed to get canvas context');
+  // Use appropriate decoder based on mime type
+  if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
+    return await decodeJpeg(imageData);
+  } else if (mimeType === "image/png") {
+    return await decodePng(imageData);
+  } else {
+    throw new Error(`Unsupported image format: ${mimeType}. Only JPEG and PNG are supported.`);
   }
-  
-  ctx.drawImage(imageBitmap, 0, 0);
-  return ctx.getImageData(0, 0, imageBitmap.width, imageBitmap.height);
 }
 
 /**

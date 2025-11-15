@@ -473,6 +473,7 @@ After a sync, verify images are in your R2 bucket:
 
 The worker uses **open-source WASM-based image processing** (@jsquash) for automatic compression and resizing:
 
+- **Supported formats**: JPEG and PNG images (most common camera formats)
 - **Automatic resizing**: Images are resized to fit within max dimensions while maintaining aspect ratio
 - **Format conversion**: JPEG/PNG images are converted to WebP for better compression
 - **Iterative optimization**: Large images are compressed multiple times until under 1MB target size
