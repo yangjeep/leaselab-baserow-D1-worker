@@ -157,11 +157,49 @@ export async function processImagesFromFolder(
     try {
       // Check if already processed and unchanged
       const existingRecord = await getImageSyncRecord(db, file.id);
-      if (existingRecord && existingRecord.md5_hash === file.md5Checksum && existingRecord.status === "processed") {
-        if (existingRecord.r2_url) {
-          r2Urls.push(existingRecord.r2_url);
+      if (existingRecord && existingRecord.status === "processed") {
+        // Check for discrepancies: verify R2 file exists and hash matches
+        let needsResync = false;
+        
+        if (existingRecord.r2_key) {
+          // Check if R2 file exists
+          const r2Object = await bucket.head(existingRecord.r2_key);
+          if (!r2Object) {
+            console.log(`Discrepancy detected: R2 file missing for ${file.name} (key: ${existingRecord.r2_key}), resyncing...`);
+            needsResync = true;
+          } else {
+            // Check if hash matches
+            const r2Hash = r2Object.customMetadata?.["x-hash-md5"];
+            if (existingRecord.md5_hash && r2Hash && existingRecord.md5_hash !== r2Hash) {
+              console.log(`Discrepancy detected: Hash mismatch for ${file.name} (DB: ${existingRecord.md5_hash}, R2: ${r2Hash}), resyncing...`);
+              needsResync = true;
+            } else if (existingRecord.md5_hash !== file.md5Checksum) {
+              // Drive file has changed
+              console.log(`File changed: ${file.name} (old hash: ${existingRecord.md5_hash}, new hash: ${file.md5Checksum}), resyncing...`);
+              needsResync = true;
+            }
+          }
+        } else {
+          // Record says processed but no R2 key - discrepancy
+          console.log(`Discrepancy detected: Record marked processed but no R2 key for ${file.name}, resyncing...`);
+          needsResync = true;
         }
-        continue;
+        
+        // If no discrepancies and hash matches, skip processing
+        if (!needsResync && existingRecord.md5_hash === file.md5Checksum) {
+          if (existingRecord.r2_url) {
+            r2Urls.push(existingRecord.r2_url);
+          }
+          continue;
+        }
+        
+        // If there's a discrepancy or hash changed, we'll resync below
+        console.log(`Resyncing image: ${file.name}`);
+      }
+      
+      // Also resync if record exists but status is failed
+      if (existingRecord && existingRecord.status === "failed") {
+        console.log(`Retrying failed image: ${file.name}`);
       }
 
       // Download and process image
