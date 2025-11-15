@@ -376,6 +376,40 @@ async function handleRowsDeleted(rowIds: number[], tableId: number, env: Env): P
 }
 
 /**
+ * Extract selection values from Baserow selection fields, ignoring color codes
+ */
+function extractSelectionValue(value: any, fieldType: string): any {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  // Only process selection fields for pets and status
+  if (fieldType !== "single_select" && fieldType !== "multiple_select") {
+    return value;
+  }
+
+  // For single_select, extract value property if it's an object
+  if (fieldType === "single_select") {
+    if (typeof value === "object" && value !== null && "value" in value) {
+      return value.value;
+    }
+    return value;
+  }
+
+  // For multiple_select, extract value properties from array
+  if (fieldType === "multiple_select" && Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item === "object" && item !== null && "value" in item) {
+        return item.value;
+      }
+      return item;
+    });
+  }
+
+  return value;
+}
+
+/**
  * Sync a single row to D1
  */
 async function syncRowToD1(
@@ -392,10 +426,15 @@ async function syncRowToD1(
 
     for (const field of fields) {
       const columnName = sanitizeFieldName(field.name);
-      const value = row[field.name];
+      let value = row[field.name];
 
       columns.push(columnName);
       placeholders.push("?");
+
+      // Extract selection values for pets and status fields, ignoring color codes
+      if (field.name === "pets" || field.name === "status") {
+        value = extractSelectionValue(value, field.type);
+      }
 
       // Serialize complex types to JSON
       if (value !== null && value !== undefined) {
