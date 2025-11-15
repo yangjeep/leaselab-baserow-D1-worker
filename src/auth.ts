@@ -30,7 +30,6 @@ export async function verifyWebhookSignature(
     // Check if it's just the secret first (simple string comparison)
     const trimmedSignature = signature.trim();
     if (trimmedSignature === env.WEBHOOK_SECRET) {
-      console.log("Signature matches secret directly (simple auth)");
       return true;
     }
     
@@ -44,7 +43,6 @@ export async function verifyWebhookSignature(
       const v1Match = actualSignature.match(/v1=([^,]+)/);
       if (v1Match && v1Match[1]) {
         actualSignature = v1Match[1].trim();
-        console.log("Extracted signature from v1= format");
       }
     }
     
@@ -91,18 +89,6 @@ export async function verifyWebhookSignature(
     normalizedSignature = normalizedSignature.replace(/-/g, "").toLowerCase();
     const normalizedHex = computedSignatureHex.toLowerCase();
     
-    // Log for debugging
-    console.log("Signature verification", {
-      receivedLength: signature.length,
-      receivedPrefix: signature.substring(0, 20),
-      normalizedLength: normalizedSignature.length,
-      normalizedPrefix: normalizedSignature.substring(0, 20),
-      computedHexLength: computedSignatureHex.length,
-      computedHexPrefix: computedSignatureHex.substring(0, 20),
-      computedBase64Length: computedSignatureBase64.length,
-      computedBase64Prefix: computedSignatureBase64.substring(0, 20),
-    });
-    
     // Constant-time comparison for hex (full 64 chars)
     if (normalizedSignature.length === normalizedHex.length) {
       let match = true;
@@ -112,7 +98,6 @@ export async function verifyWebhookSignature(
         }
       }
       if (match) {
-        console.log("Signature verified (hex, full length)");
         return true;
       }
     }
@@ -127,31 +112,20 @@ export async function verifyWebhookSignature(
         }
       }
       if (match) {
-        console.log("Signature verified (hex, truncated 32 chars)");
         return true;
       }
     }
 
     // Try base64 comparison (exact match)
     if (signature === computedSignatureBase64) {
-      console.log("Signature verified (base64)");
       return true;
     }
     
     // Try base64 comparison (normalized)
     const normalizedBase64 = computedSignatureBase64.toLowerCase();
     if (normalizedSignature === normalizedBase64) {
-      console.log("Signature verified (base64, normalized)");
       return true;
     }
-
-    // Log for debugging
-    console.warn("Signature mismatch", {
-      received: signature.substring(0, 40) + "...",
-      normalized: normalizedSignature.substring(0, 40) + "...",
-      computedHex: computedSignatureHex.substring(0, 40) + "...",
-      computedBase64: computedSignatureBase64.substring(0, 40) + "...",
-    });
 
     return false;
   } catch (error) {

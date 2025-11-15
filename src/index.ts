@@ -51,13 +51,6 @@ export default {
         normalizedPath = normalizedPath.slice(0, -1);
       }
       normalizedPath = normalizedPath.toLowerCase();
-      
-      console.log("Routing check:", {
-        original: url.pathname,
-        normalized: normalizedPath,
-        method: request.method,
-        fullUrl: request.url
-      });
 
       // Health check endpoint - simplest possible
       if (normalizedPath === "/health" || (normalizedPath === "" && request.method === "GET")) {
@@ -177,26 +170,14 @@ async function handleWebhook(
     // Verify signature (skip if no secret configured)
     if (env.WEBHOOK_SECRET) {
       const signature = request.headers.get("X-Baserow-Signature");
-      console.log("Signature verification attempt", {
-        hasSignature: !!signature,
-        signatureLength: signature?.length || 0,
-        signaturePrefix: signature?.substring(0, 30) || "none",
-        bodyLength: bodyText.length,
-        bodyPreview: bodyText.substring(0, 100),
-        webhookSecretLength: env.WEBHOOK_SECRET.length,
-        webhookSecretPrefix: env.WEBHOOK_SECRET.substring(0, 20),
-      });
-      
       const verified = await verifyWebhookSignature(
         bodyText,
         signature,
         env
       );
       if (!verified) {
-        console.warn("Signature verification failed - detailed info logged above");
+        console.warn("Signature verification failed");
         return jsonResponse({ error: "Invalid webhook signature" }, 401);
-      } else {
-        console.log("✅ Signature verified successfully");
       }
     } else {
       console.log("WEBHOOK_SECRET not configured, skipping signature verification");
@@ -328,7 +309,6 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env,
       // Try case-insensitive match
       const matchingKey = rowKeys.find(key => key.toLowerCase() === field.name.toLowerCase());
       if (matchingKey) {
-        console.log(`Field name mismatch in webhook: API has "${field.name}", row has "${matchingKey}" - using row key`);
         return { ...field, name: matchingKey }; // Use row's field name
       }
       return field; // Keep original, will be handled in syncRowToD1
@@ -379,7 +359,6 @@ async function handleRowsUpdated(
       }
       const matchingKey = rowKeys.find(key => key.toLowerCase() === field.name.toLowerCase());
       if (matchingKey) {
-        console.log(`Field name mismatch in webhook: API has "${field.name}", row has "${matchingKey}" - using row key`);
         return { ...field, name: matchingKey };
       }
       return field;
@@ -472,14 +451,8 @@ async function syncRowToD1(
   fields: BaserowField[]
 ): Promise<void> {
   try {
-    // Debug: Log field names and row keys for troubleshooting
-    const fieldNames = fields.map(f => f.name);
-    const rowKeys = Object.keys(row);
-    console.log(`Syncing row ${row.id} - Fields: [${fieldNames.join(", ")}], Row keys: [${rowKeys.join(", ")}]`);
-    
     const columns: string[] = ["id"];
     const values: any[] = [row.id];
-
     const placeholders: string[] = ["?"];
 
     for (const field of fields) {
@@ -494,13 +467,12 @@ async function syncRowToD1(
         const matchingKey = rowKeys.find(key => key.toLowerCase() === field.name.toLowerCase());
         if (matchingKey) {
           value = row[matchingKey];
-          console.log(`Field name matched (case-insensitive): "${field.name}" -> "${matchingKey}"`);
         }
       }
       
       // Log if value is still undefined (field might be missing from row data)
       if (value === undefined) {
-        console.warn(`Field "${field.name}" not found in row ${row.id}. Available keys:`, Object.keys(row));
+        console.warn(`Field "${field.name}" not found in row ${row.id}`);
       }
 
       columns.push(columnName);
@@ -535,7 +507,7 @@ async function syncRowToD1(
 
     // Upsert row
     const updateColumns = columns
-      .slice(2)
+      .slice(1) // Skip 'id' column
       .map((col) => `${col} = excluded.${col}`)
       .join(", ");
 

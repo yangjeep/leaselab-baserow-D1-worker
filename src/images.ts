@@ -290,10 +290,54 @@ export async function processImagesFromFolder(
       // Also resync if record exists but status is failed
       if (existingRecord && existingRecord.status === "failed") {
         console.log(`Retrying failed image: ${file.name}`);
+        // Check if there's an existing R2 URL that might still be valid
+        if (existingRecord.r2_url && existingRecord.r2_key) {
+          try {
+            const r2Object = await bucket.head(existingRecord.r2_key);
+            if (r2Object) {
+              console.log(`Found existing R2 file for failed image ${file.name}, reusing URL: ${existingRecord.r2_url}`);
+              // Reuse existing URL if file still exists
+              r2Urls.push(existingRecord.r2_url);
+              // Update status to processed since we found a valid file
+              await upsertImageSyncRecord(db, {
+                google_drive_file_id: file.id,
+                google_drive_folder_id: folderId,
+                r2_url: existingRecord.r2_url,
+                r2_key: existingRecord.r2_key,
+                table_id: tableId,
+                row_id: rowId,
+                field_name: fieldName,
+                original_size: existingRecord.original_size,
+                optimized_size: existingRecord.optimized_size,
+                status: "processed",
+                processed_at: new Date().toISOString(),
+                error_message: null,
+                md5_hash: file.md5Checksum || existingRecord.md5_hash,
+                file_name: file.name,
+              });
+              continue; // Skip reprocessing if we found a valid existing file
+            }
+          } catch (r2CheckError) {
+            console.log(`Existing R2 file check failed for ${file.name}, will reprocess:`, r2CheckError);
+            // Continue with reprocessing
+          }
+        }
+        // Log the previous error for context
+        if (existingRecord.error_message) {
+          console.log(`Previous error for ${file.name}: ${existingRecord.error_message}`);
+        }
       }
 
       // Download and process image
-      const imageData = await downloadDriveFile(file.id, accessToken);
+      console.log(`Downloading image ${file.name} (${file.id}) from Google Drive...`);
+      let imageData: ArrayBuffer;
+      try {
+        imageData = await downloadDriveFile(file.id, accessToken);
+        console.log(`Successfully downloaded ${file.name}, size: ${imageData.byteLength} bytes`);
+      } catch (downloadError) {
+        console.error(`Failed to download ${file.name} from Google Drive:`, downloadError);
+        throw new Error(`Download failed: ${downloadError instanceof Error ? downloadError.message : String(downloadError)}`);
+      }
       const originalSize = imageData.byteLength;
 
       // Check file size
@@ -377,6 +421,7 @@ export async function processImagesFromFolder(
         sanitizedFilename = sanitizedFilename.replace(/\.[^.]+$/, ".webp");
       }
       const r2Key = `${tableId}/${rowId}/${sanitizedFilename}`;
+      console.log(`Uploading ${file.name} to R2 with key: ${r2Key}, size: ${optimizedSize} bytes, mimeType: ${optimizedMimeType}`);
 
       // Upload to R2
       const customMetadata: Record<string, string> = {
@@ -388,12 +433,18 @@ export async function processImagesFromFolder(
         customMetadata["x-hash-md5"] = file.md5Checksum;
       }
 
-      await bucket.put(r2Key, optimizedData, {
-        httpMetadata: {
-          contentType: optimizedMimeType,
-        },
-        customMetadata,
-      });
+      try {
+        await bucket.put(r2Key, optimizedData, {
+          httpMetadata: {
+            contentType: optimizedMimeType,
+          },
+          customMetadata,
+        });
+        console.log(`Successfully uploaded ${file.name} to R2: ${r2Key}`);
+      } catch (uploadError) {
+        console.error(`Failed to upload ${file.name} to R2:`, uploadError);
+        throw new Error(`R2 upload failed: ${uploadError instanceof Error ? uploadError.message : String(uploadError)}`);
+      }
 
       // Generate R2 public URL
       const r2Url = `${r2PublicDomain}/${r2Key}`;
@@ -419,9 +470,14 @@ export async function processImagesFromFolder(
       r2Urls.push(r2Url);
       console.log(`Processed image: ${file.name} -> ${r2Key}`);
     } catch (error) {
-      console.error(`Failed to process image ${file.name}:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      console.error(`Failed to process image ${file.name}:`, errorMessage);
+      if (errorStack) {
+        console.error(`Error stack for ${file.name}:`, errorStack);
+      }
       
-      // Record error
+      // Record error with detailed information
       await upsertImageSyncRecord(db, {
         google_drive_file_id: file.id,
         google_drive_folder_id: folderId,
@@ -434,7 +490,7 @@ export async function processImagesFromFolder(
         optimized_size: null,
         status: "failed",
         processed_at: new Date().toISOString(),
-        error_message: error instanceof Error ? error.message : "Unknown error",
+        error_message: errorMessage,
         md5_hash: file.md5Checksum || null,
         file_name: file.name,
       });
