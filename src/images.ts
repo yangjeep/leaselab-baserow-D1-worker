@@ -4,9 +4,10 @@
  */
 
 import type { D1Database, R2Bucket, DriveFile, Env, ImageSyncRecord } from "./types";
-import { extractDriveFolderId } from "./utils";
+import { extractDriveFolderId, sanitizeFieldName } from "./utils";
 import { listDriveFiles, downloadDriveFile, getAccessToken } from "./google-drive";
 import { getEnvNumber, getEnvString } from "./utils";
+import { getTableColumns } from "./schema";
 
 /**
  * Get R2 object hash from metadata
@@ -127,7 +128,8 @@ export async function processImagesFromFolder(
   folderUrl: string,
   tableId: number,
   rowId: number,
-  fieldName: string
+  fieldName: string,
+  tableName?: string
 ): Promise<string[]> {
   const folderId = extractDriveFolderId(folderUrl);
   if (!folderId) {
@@ -267,7 +269,48 @@ export async function processImagesFromFolder(
     }
   }
 
+  // Update the row in the D1 table with R2 URLs if table name is provided
+  if (tableName && r2Urls.length > 0) {
+    await updateRowWithR2Urls(db, tableName, rowId, fieldName, r2Urls);
+  }
+
   return r2Urls;
+}
+
+/**
+ * Update a row in the D1 table with R2 URLs for a specific field
+ */
+export async function updateRowWithR2Urls(
+  db: D1Database,
+  tableName: string,
+  rowId: number,
+  fieldName: string,
+  r2Urls: string[]
+): Promise<void> {
+  try {
+    // Create column name for R2 URLs (e.g., "image_r2_urls")
+    const r2UrlsColumnName = sanitizeFieldName(`${fieldName}_r2_urls`);
+    
+    // Check if column exists, if not add it
+    const columns = await getTableColumns(db, tableName);
+    if (!columns.includes(r2UrlsColumnName)) {
+      console.log(`Adding column ${r2UrlsColumnName} to ${tableName}`);
+      await db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${r2UrlsColumnName} TEXT`).run();
+    }
+    
+    // Update the row with R2 URLs as JSON array
+    const r2UrlsJson = JSON.stringify(r2Urls);
+    await db.prepare(`
+      UPDATE ${tableName} 
+      SET ${r2UrlsColumnName} = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).bind(r2UrlsJson, rowId).run();
+    
+    console.log(`Updated row ${rowId} in ${tableName} with ${r2Urls.length} R2 URLs for field ${fieldName}`);
+  } catch (error) {
+    console.error(`Error updating row ${rowId} with R2 URLs:`, error);
+    // Don't throw - this is not critical for the sync process
+  }
 }
 
 /**

@@ -93,13 +93,12 @@ export async function createBaserowTable(
   tableName: string,
   fields: BaserowField[]
 ): Promise<void> {
-  // Sanitize table name
-  const sanitizedTableName = sanitizeFieldName(`table_${tableId}_${tableName}`);
+  // Use getTableName to ensure consistent naming
+  const sanitizedTableName = getTableName(tableId, tableName);
 
   // Build column definitions
   const columns: string[] = [
     "id INTEGER PRIMARY KEY", // Baserow row ID
-    "\"order\" TEXT", // Baserow order field (escaped because order is a reserved keyword)
   ];
 
   // Add columns for each field
@@ -180,6 +179,10 @@ export async function addMissingColumns(
  * Get the sanitized table name for a Baserow table
  */
 export function getTableName(tableId: number, tableName: string): string {
+  // If tableName is just the tableId (as string), don't duplicate it
+  if (tableName === String(tableId)) {
+    return sanitizeFieldName(`table_${tableId}`);
+  }
   return sanitizeFieldName(`table_${tableId}_${tableName}`);
 }
 

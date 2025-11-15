@@ -282,24 +282,25 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env)
   for (const row of items) {
     await syncRowToD1(env.D1_DATABASE, d1TableName, row, fields);
 
-    // Process images from image fields
-    for (const field of imageFields) {
-      const fieldValue = row[field.name];
-      if (fieldValue && typeof fieldValue === "string") {
-        // Process images asynchronously
-        processImagesFromFolder(
-          env.D1_DATABASE,
-          env.R2_BUCKET,
-          env,
-          fieldValue,
-          tableId,
-          row.id,
-          field.name
-        ).catch((error) => {
-          console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
-        });
+      // Process images from image fields
+      for (const field of imageFields) {
+        const fieldValue = row[field.name];
+        if (fieldValue && typeof fieldValue === "string" && env.R2_BUCKET) {
+          // Process images asynchronously
+          processImagesFromFolder(
+            env.D1_DATABASE,
+            env.R2_BUCKET,
+            env,
+            fieldValue,
+            tableId,
+            row.id,
+            field.name,
+            d1TableName
+          ).catch((error) => {
+            console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
+          });
+        }
       }
-    }
   }
 }
 
@@ -335,7 +336,7 @@ async function handleRowsUpdated(
       const newValue = row[field.name];
       const oldValue = oldRow?.[field.name];
 
-      if (newValue && newValue !== oldValue && typeof newValue === "string") {
+      if (newValue && newValue !== oldValue && typeof newValue === "string" && env.R2_BUCKET) {
         // Process images asynchronously
         processImagesFromFolder(
           env.D1_DATABASE,
@@ -344,7 +345,8 @@ async function handleRowsUpdated(
           newValue,
           tableId,
           row.id,
-          field.name
+          field.name,
+          d1TableName
         ).catch((error) => {
           console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
         });
@@ -383,10 +385,10 @@ async function syncRowToD1(
   fields: BaserowField[]
 ): Promise<void> {
   try {
-    const columns: string[] = ["id", "\"order\""];
-    const values: any[] = [row.id, row.order];
+    const columns: string[] = ["id"];
+    const values: any[] = [row.id];
 
-    const placeholders: string[] = ["?", "?"];
+    const placeholders: string[] = ["?"];
 
     for (const field of fields) {
       const columnName = sanitizeFieldName(field.name);
@@ -521,9 +523,16 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
 
         // Create/update table in D1
         const d1TableName = getTableName(table.id, table.name);
-        if (!(await tableExists(env.D1_DATABASE, d1TableName))) {
+        console.log(`Checking for table: ${d1TableName}`);
+        const exists = await tableExists(env.D1_DATABASE, d1TableName);
+        console.log(`Table exists: ${exists}`);
+        
+        if (!exists) {
+          console.log(`Creating table: ${d1TableName}`);
           await createBaserowTable(env.D1_DATABASE, table.id, table.name, fields);
+          console.log(`Table created: ${d1TableName}`);
         } else {
+          console.log(`Table already exists, adding missing columns: ${d1TableName}`);
           await addMissingColumns(env.D1_DATABASE, d1TableName, fields);
         }
 
@@ -540,7 +549,7 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
             // Process images asynchronously
             for (const field of imageFields) {
               const fieldValue = row[field.name];
-              if (fieldValue && typeof fieldValue === "string") {
+              if (fieldValue && typeof fieldValue === "string" && env.R2_BUCKET) {
                 ctx.waitUntil(
                   processImagesFromFolder(
                     env.D1_DATABASE,
@@ -549,7 +558,8 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
                     fieldValue,
                     table.id,
                     row.id,
-                    field.name
+                    field.name,
+                    d1TableName
                   ).then(() => {
                     summary.imagesProcessed++;
                   }).catch((error) => {
