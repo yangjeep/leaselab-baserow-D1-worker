@@ -136,7 +136,7 @@ npx wrangler secret put SYNC_SECRET --env demo  # Required
 1. Go to your Baserow workspace settings
 2. Navigate to Webhooks section
 3. Create a new webhook with:
-   - **URL**: `https://your-worker-url.workers.dev/webhook`
+   - **URL**: `https://baserow-rio-sync.rent-in-ottawa.ca/webhook`
    - **Events**: Select `rows.created`, `rows.updated`, `rows.deleted`
    - **Secret**: Use the same value as `WEBHOOK_SECRET` in your worker secrets
 4. Save the webhook
@@ -207,7 +207,7 @@ After deployment, note the Worker URL from the output:
 
 **Production:**
 ```
-✨  Deployed to https://rental-manager-image-sync-demo.workers.dev
+✨  Deployed to https://baserow-rio-sync.rent-in-ottawa.ca
 ```
 
 **Demo:**
@@ -216,8 +216,9 @@ After deployment, note the Worker URL from the output:
 ```
 
 **Endpoints:**
-- Webhook: `https://your-worker-url.workers.dev/webhook`
-- Sync: `https://your-worker-url.workers.dev/sync`
+- Webhook: `https://baserow-rio-sync.rent-in-ottawa.ca/webhook`
+- Sync: `https://baserow-rio-sync.rent-in-ottawa.ca/sync`
+- Health: `https://baserow-rio-sync.rent-in-ottawa.ca/health`
 
 ## Usage
 
@@ -238,7 +239,7 @@ Trigger a full database sync manually via HTTP:
 ```bash
 # Authentication is required - Bearer token must be provided
 curl -H "Authorization: Bearer your-secret-here" \
-  https://rental-manager-image-sync-demo.workers.dev/sync
+  https://baserow-rio-sync.rent-in-ottawa.ca/sync
 ```
 
 **Demo:**
