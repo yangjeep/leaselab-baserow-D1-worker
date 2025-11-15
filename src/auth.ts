@@ -25,6 +25,31 @@ export async function verifyWebhookSignature(
   }
 
   try {
+    // Baserow might send the secret directly in the header (simple auth)
+    // OR compute an HMAC signature
+    // Check if it's just the secret first (simple string comparison)
+    const trimmedSignature = signature.trim();
+    if (trimmedSignature === env.WEBHOOK_SECRET) {
+      console.log("Signature matches secret directly (simple auth)");
+      return true;
+    }
+    
+    // If not a direct match, try HMAC signature verification
+    // Baserow might send signature in format: "t=timestamp,v1=signature" or just "signature"
+    // Extract the actual signature value
+    let actualSignature = trimmedSignature;
+    
+    // Check if it's in the format "t=timestamp,v1=signature"
+    if (actualSignature.includes("v1=")) {
+      const v1Match = actualSignature.match(/v1=([^,]+)/);
+      if (v1Match && v1Match[1]) {
+        actualSignature = v1Match[1].trim();
+        console.log("Extracted signature from v1= format");
+      }
+    }
+    
+    // Use the extracted signature for verification
+    signature = actualSignature;
     // Compute HMAC-SHA256
     const encoder = new TextEncoder();
     const keyData = encoder.encode(env.WEBHOOK_SECRET);
@@ -40,24 +65,43 @@ export async function verifyWebhookSignature(
 
     const signatureBuffer = await crypto.subtle.sign("HMAC", cryptoKey, messageData);
     
+    // Convert ArrayBuffer to Uint8Array
+    const signatureArray = new Uint8Array(signatureBuffer);
+    
     // Try hex format first
-    const computedSignatureHex = Array.from(new Uint8Array(signatureBuffer))
+    const computedSignatureHex = Array.from(signatureArray)
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
 
     // Try base64 format
-    // Convert Uint8Array to base64
-    const bytes = new Uint8Array(signatureBuffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const computedSignatureBase64 = btoa(binary);
+    const computedSignatureBase64 = btoa(String.fromCharCode(...signatureArray));
 
-    // Compare signatures - try both hex and base64
-    // Remove any dashes from signature (UUID format)
-    const normalizedSignature = signature.replace(/-/g, "").toLowerCase();
+    // Normalize received signature - handle common formats
+    // Baserow might send: "sha256=...", "sha256:...", or just the hex/base64
+    let normalizedSignature = signature.trim();
+    
+    // Remove common prefixes
+    if (normalizedSignature.startsWith("sha256=")) {
+      normalizedSignature = normalizedSignature.substring(7);
+    } else if (normalizedSignature.startsWith("sha256:")) {
+      normalizedSignature = normalizedSignature.substring(7);
+    }
+    
+    // Remove any dashes (UUID format) and convert to lowercase
+    normalizedSignature = normalizedSignature.replace(/-/g, "").toLowerCase();
     const normalizedHex = computedSignatureHex.toLowerCase();
+    
+    // Log for debugging
+    console.log("Signature verification", {
+      receivedLength: signature.length,
+      receivedPrefix: signature.substring(0, 20),
+      normalizedLength: normalizedSignature.length,
+      normalizedPrefix: normalizedSignature.substring(0, 20),
+      computedHexLength: computedSignatureHex.length,
+      computedHexPrefix: computedSignatureHex.substring(0, 20),
+      computedBase64Length: computedSignatureBase64.length,
+      computedBase64Prefix: computedSignatureBase64.substring(0, 20),
+    });
     
     // Constant-time comparison for hex (full 64 chars)
     if (normalizedSignature.length === normalizedHex.length) {
@@ -67,10 +111,13 @@ export async function verifyWebhookSignature(
           match = false;
         }
       }
-      if (match) return true;
+      if (match) {
+        console.log("Signature verified (hex, full length)");
+        return true;
+      }
     }
 
-    // Try truncated hex (first 32 chars = 16 bytes) - Baserow might truncate
+    // Try truncated hex (first 32 chars = 16 bytes) - some systems truncate
     if (normalizedSignature.length === 32 && normalizedHex.length >= 32) {
       const truncatedHex = normalizedHex.substring(0, 32);
       let match = true;
@@ -79,19 +126,31 @@ export async function verifyWebhookSignature(
           match = false;
         }
       }
-      if (match) return true;
+      if (match) {
+        console.log("Signature verified (hex, truncated 32 chars)");
+        return true;
+      }
     }
 
-    // Try base64 comparison
+    // Try base64 comparison (exact match)
     if (signature === computedSignatureBase64) {
+      console.log("Signature verified (base64)");
+      return true;
+    }
+    
+    // Try base64 comparison (normalized)
+    const normalizedBase64 = computedSignatureBase64.toLowerCase();
+    if (normalizedSignature === normalizedBase64) {
+      console.log("Signature verified (base64, normalized)");
       return true;
     }
 
-    // Log for debugging (remove dashes for comparison)
+    // Log for debugging
     console.warn("Signature mismatch", {
-      received: signature.substring(0, 20) + "...",
-      computedHex: computedSignatureHex.substring(0, 20) + "...",
-      computedBase64: computedSignatureBase64.substring(0, 20) + "...",
+      received: signature.substring(0, 40) + "...",
+      normalized: normalizedSignature.substring(0, 40) + "...",
+      computedHex: computedSignatureHex.substring(0, 40) + "...",
+      computedBase64: computedSignatureBase64.substring(0, 40) + "...",
     });
 
     return false;

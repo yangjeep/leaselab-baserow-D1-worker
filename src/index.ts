@@ -45,21 +45,47 @@ export default {
         return jsonResponse({ error: "Invalid URL" }, 400);
       }
 
+      // Normalize pathname (remove trailing slash, handle root)
+      let normalizedPath = url.pathname;
+      if (normalizedPath.endsWith("/") && normalizedPath.length > 1) {
+        normalizedPath = normalizedPath.slice(0, -1);
+      }
+      normalizedPath = normalizedPath.toLowerCase();
+      
+      console.log("Routing check:", {
+        original: url.pathname,
+        normalized: normalizedPath,
+        method: request.method,
+        fullUrl: request.url
+      });
+
       // Health check endpoint - simplest possible
-      if (url.pathname === "/health" || (url.pathname === "/" && request.method === "GET")) {
+      if (normalizedPath === "/health" || (normalizedPath === "" && request.method === "GET")) {
         return new Response(JSON.stringify({ status: "ok" }), {
           headers: { "Content-Type": "application/json" },
         });
       }
 
       // Webhook endpoint for Baserow
-      if (url.pathname === "/webhook" && request.method === "POST") {
-        console.log("Webhook endpoint matched");
-        return await handleWebhook(request, env, ctx);
+      // Handle both /webhook and /webhook/ (with or without trailing slash)
+      // Also handle GET requests for webhook verification (some systems send GET)
+      if (normalizedPath === "/webhook") {
+        if (request.method === "POST") {
+          console.log("Webhook endpoint matched (POST)");
+          return await handleWebhook(request, env, ctx);
+        } else if (request.method === "GET") {
+          // Some webhook systems send GET for verification
+          console.log("Webhook endpoint matched (GET - verification)");
+          return jsonResponse({ 
+            status: "ok", 
+            message: "Webhook endpoint is active",
+            endpoint: "/webhook"
+          });
+        }
       }
 
       // Sync endpoint
-      if (url.pathname === "/sync") {
+      if (normalizedPath === "/sync") {
         // Require SYNC_SECRET to be configured
         if (!env.SYNC_SECRET) {
           return jsonResponse({ error: "SYNC_SECRET not configured" }, 500);
@@ -151,16 +177,27 @@ async function handleWebhook(
     // Verify signature (skip if no secret configured)
     if (env.WEBHOOK_SECRET) {
       const signature = request.headers.get("X-Baserow-Signature");
+      console.log("Signature verification attempt", {
+        hasSignature: !!signature,
+        signatureLength: signature?.length || 0,
+        signaturePrefix: signature?.substring(0, 30) || "none",
+        bodyLength: bodyText.length,
+        bodyPreview: bodyText.substring(0, 100),
+        webhookSecretLength: env.WEBHOOK_SECRET.length,
+        webhookSecretPrefix: env.WEBHOOK_SECRET.substring(0, 20),
+      });
+      
       const verified = await verifyWebhookSignature(
         bodyText,
         signature,
         env
       );
       if (!verified) {
-        console.warn("Signature verification failed");
+        console.warn("Signature verification failed - detailed info logged above");
         return jsonResponse({ error: "Invalid webhook signature" }, 401);
+      } else {
+        console.log("✅ Signature verified successfully");
       }
-      console.log("Signature verified");
     } else {
       console.log("WEBHOOK_SECRET not configured, skipping signature verification");
     }
@@ -256,15 +293,13 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env,
   console.log("handleRowsCreated: image fields", { count: imageFields.length });
 
   // Ensure table exists in D1
-  console.log("handleRowsCreated: fetching tables");
-  const tables = await fetchTables(env, parseInt(getEnvString(env, "BASEROW_DATABASE_ID", "321013")));
-  const table = tables.find((t) => t.id === tableId);
-  if (!table) {
-    throw new Error(`Table ${tableId} not found`);
-  }
-  console.log("handleRowsCreated: table found", { tableId: table.id, tableName: table.name });
+  // When using Database Token, we can't fetch tables from Backend API
+  // So we'll use the table ID as the name (similar to handleFullSync)
+  // Skip API call entirely - Database Token doesn't support Backend API
+  const tableName = String(tableId);
+  console.log("handleRowsCreated: using table ID as name (Database Token mode)", { tableId, tableName });
 
-  const d1TableName = getTableName(tableId, table.name);
+  const d1TableName = getTableName(tableId, tableName);
   console.log("handleRowsCreated: D1 table name", { d1TableName });
   
   const exists = await tableExists(env.D1_DATABASE, d1TableName);
@@ -272,10 +307,12 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env,
   
   if (!exists) {
     console.log("handleRowsCreated: creating D1 table");
-    await createBaserowTable(env.D1_DATABASE, tableId, table.name, fields);
+    await createBaserowTable(env.D1_DATABASE, tableId, tableName, fields);
     console.log("handleRowsCreated: D1 table created");
   } else {
     console.log("handleRowsCreated: D1 table already exists");
+    // Add missing columns if table exists
+    await addMissingColumns(env.D1_DATABASE, d1TableName, fields);
   }
 
   // Process each row - sync data and images together
@@ -308,13 +345,10 @@ async function handleRowsUpdated(
     f.name.toLowerCase().includes("image") || f.type === "file"
   );
 
-  const tables = await fetchTables(env, parseInt(getEnvString(env, "BASEROW_DATABASE_ID", "321013")));
-  const table = tables.find((t) => t.id === tableId);
-  if (!table) {
-    throw new Error(`Table ${tableId} not found`);
-  }
-
-  const d1TableName = getTableName(tableId, table.name);
+  // Skip API call - Database Token doesn't support Backend API
+  // Use table ID as name directly
+  const tableName = String(tableId);
+  const d1TableName = getTableName(tableId, tableName);
 
   // Process each updated row - sync data and images together
   for (const row of items) {
@@ -345,16 +379,16 @@ async function handleRowsUpdated(
  * Handle rows.deleted event
  */
 async function handleRowsDeleted(rowIds: number[], tableId: number, env: Env): Promise<void> {
+  // Skip API call - Database Token doesn't support Backend API
+  // Use table ID as name directly
+  const tableName = String(tableId);
+  const d1TableName = getTableName(tableId, tableName);
+  
   for (const rowId of rowIds) {
     // Delete from D1
-    const tables = await fetchTables(env, parseInt(getEnvString(env, "BASEROW_DATABASE_ID", "321013")));
-    const table = tables.find((t) => t.id === tableId);
-    if (table) {
-      const d1TableName = getTableName(tableId, table.name);
-      await env.D1_DATABASE.prepare(`DELETE FROM ${d1TableName} WHERE id = ?`)
-        .bind(rowId)
-        .run();
-    }
+    await env.D1_DATABASE.prepare(`DELETE FROM ${d1TableName} WHERE id = ?`)
+      .bind(rowId)
+      .run();
 
     // Delete images
     await deleteRowImages(env.D1_DATABASE, env.R2_BUCKET, tableId, rowId);
