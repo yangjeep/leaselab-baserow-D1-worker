@@ -1,13 +1,38 @@
 /**
  * Image processing and R2 upload
- * Extracted and enhanced from existing worker code
+ * Uses @jsquash WASM-based image processing
  */
 
-import type { D1Database, R2Bucket, DriveFile, Env, ImageSyncRecord } from "./types";
+import type { DriveFile, Env, ImageSyncRecord } from "./types";
 import { extractDriveFolderId, sanitizeFieldName } from "./utils";
 import { listDriveFiles, downloadDriveFile, getAccessToken } from "./google-drive";
 import { getEnvNumber, getEnvString } from "./utils";
 import { getTableColumns } from "./schema";
+import resize from "@jsquash/resize";
+import { encode as encodeJpeg } from "@jsquash/jpeg";
+import { encode as encodeWebp } from "@jsquash/webp";
+
+// Type definitions for browser APIs available in Cloudflare Workers
+declare function createImageBitmap(blob: Blob): Promise<ImageBitmap>;
+declare class OffscreenCanvas {
+  constructor(width: number, height: number);
+  getContext(contextId: "2d"): OffscreenCanvasRenderingContext2D | null;
+  width: number;
+  height: number;
+}
+interface OffscreenCanvasRenderingContext2D {
+  drawImage(image: ImageBitmap, dx: number, dy: number): void;
+  getImageData(sx: number, sy: number, sw: number, sh: number): ImageData;
+}
+interface ImageBitmap {
+  readonly width: number;
+  readonly height: number;
+}
+interface ImageData {
+  readonly data: Uint8ClampedArray;
+  readonly width: number;
+  readonly height: number;
+}
 
 /**
  * Check if image should be converted to WebP
@@ -65,9 +90,67 @@ function calculateOptimalResizeParams(
 }
 
 /**
- * Optimize image using Cloudflare's Image Resizing API
- * This function uploads the image to a temporary R2 location, uses the
- * Image Resizing API to get an optimized version, then returns it
+ * Decode image from ArrayBuffer to ImageData
+ */
+async function decodeImage(imageData: ArrayBuffer, mimeType: string): Promise<ImageData> {
+  // Create a blob from the ArrayBuffer
+  const blob = new Blob([imageData], { type: mimeType });
+  
+  // Use native browser ImageBitmap API (available in Workers)
+  const imageBitmap = await createImageBitmap(blob);
+  
+  // Create canvas and get ImageData
+  const canvas = new OffscreenCanvas(imageBitmap.width, imageBitmap.height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    throw new Error('Failed to get canvas context');
+  }
+  
+  ctx.drawImage(imageBitmap, 0, 0);
+  return ctx.getImageData(0, 0, imageBitmap.width, imageBitmap.height);
+}
+
+/**
+ * Calculate optimal dimensions maintaining aspect ratio
+ */
+function calculateDimensions(
+  originalWidth: number,
+  originalHeight: number,
+  maxWidth: number,
+  maxHeight: number
+): { width: number; height: number } {
+  let width = originalWidth;
+  let height = originalHeight;
+  
+  // Only resize if image is larger than max dimensions
+  if (width > maxWidth || height > maxHeight) {
+    const aspectRatio = width / height;
+    
+    if (width > height) {
+      width = Math.min(width, maxWidth);
+      height = Math.round(width / aspectRatio);
+    } else {
+      height = Math.min(height, maxHeight);
+      width = Math.round(height * aspectRatio);
+    }
+    
+    // Ensure we don't exceed max dimensions
+    if (width > maxWidth) {
+      width = maxWidth;
+      height = Math.round(width / aspectRatio);
+    }
+    if (height > maxHeight) {
+      height = maxHeight;
+      width = Math.round(height * aspectRatio);
+    }
+  }
+  
+  return { width, height };
+}
+
+/**
+ * Optimize image using WASM-based processing (@jsquash)
+ * This function decodes, resizes, and re-encodes the image
  */
 async function optimizeImage(
   imageData: ArrayBuffer,
@@ -75,82 +158,68 @@ async function optimizeImage(
   maxWidth: number,
   maxHeight: number,
   quality: number,
-  bucket: R2Bucket,
-  tempKey: string,
-  r2PublicDomain: string,
   originalSize?: number
-): Promise<ArrayBuffer> {
+): Promise<{ data: ArrayBuffer; mimeType: string }> {
   try {
-    // Step 1: Upload original to temporary R2 location
-    await bucket.put(tempKey, imageData, {
-      httpMetadata: {
-        contentType: mimeType,
-      },
-    });
+    console.log(`Starting WASM-based optimization: target ${maxWidth}x${maxHeight}, quality ${quality}`);
     
-    // Step 2: Use Cloudflare Image Resizing API to get optimized version
-    // The Image Resizing API is available at: /cdn-cgi/image/
-    // Note: This requires the R2 public domain to be on Cloudflare
-    // For large images, use fit=scale-down to only resize if larger than target
-    // Use sharpen=1 for better quality on downscaled images
-    const sizeMB = originalSize ? originalSize / (1024 * 1024) : 0;
-    const fitMode = sizeMB > 10 ? "scale-down" : "inside"; // scale-down for very large images
-    const sharpen = sizeMB > 5 ? 1 : 0; // Sharpen large downscaled images
+    // Decode image to ImageData
+    const imageDataObj = await decodeImage(imageData, mimeType);
+    const originalWidth = imageDataObj.width;
+    const originalHeight = imageDataObj.height;
     
-    const resizeUrl = `${r2PublicDomain}/cdn-cgi/image/width=${maxWidth},height=${maxHeight},quality=${quality},fit=${fitMode},format=auto${sharpen ? ",sharpen=1" : ""}/${tempKey}`;
-    console.log(`Image Resizing API URL: ${resizeUrl.substring(0, 150)}...`);
+    console.log(`Original dimensions: ${originalWidth}x${originalHeight}`);
     
-    // Fetch optimized version with timeout
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    // Calculate target dimensions
+    const { width, height } = calculateDimensions(originalWidth, originalHeight, maxWidth, maxHeight);
     
-    try {
-      const response = await fetch(resizeUrl, {
-        headers: {
-          'Accept': 'image/webp,image/*',
-        },
-        signal: controller.signal,
+    console.log(`Target dimensions: ${width}x${height}`);
+    
+    // Resize if needed
+    let resizedImageData = imageDataObj;
+    if (width !== originalWidth || height !== originalHeight) {
+      resizedImageData = await resize(imageDataObj, {
+        width,
+        height,
       });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        console.warn(`Image Resizing API failed, using original. Status: ${response.status}`);
-        // Clean up temp file
-        await bucket.delete(tempKey).catch(() => {});
-        return imageData;
-      }
-      
-      const optimizedData = await response.arrayBuffer();
-      
-      // Step 3: Clean up temporary file
-      await bucket.delete(tempKey).catch(() => {});
-      
-      // Return optimized version if it's actually smaller (at least 5% reduction)
-      if (optimizedData.byteLength < imageData.byteLength * 0.95) {
-        console.log(`Image optimized: ${imageData.byteLength} -> ${optimizedData.byteLength} bytes (${Math.round((1 - optimizedData.byteLength / imageData.byteLength) * 100)}% reduction)`);
-        return optimizedData;
-      }
-      
-      // If optimized isn't significantly smaller, return original
-      console.log(`Image optimization didn't reduce size enough, using original`);
-      return imageData;
-    } catch (fetchError) {
-      clearTimeout(timeoutId);
-      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-        console.warn(`Image Resizing API timeout, using original`);
-      } else {
-        console.warn(`Image Resizing API error, using original:`, fetchError);
-      }
-      // Clean up temp file on error
-      await bucket.delete(tempKey).catch(() => {});
-      return imageData;
+      console.log(`Resized to ${width}x${height}`);
     }
+    
+    // Encode to WebP for best compression (or JPEG as fallback)
+    let encoded: ArrayBuffer;
+    let outputMimeType: string;
+    
+    if (shouldConvertToWebP(mimeType)) {
+      try {
+        encoded = await encodeWebp(resizedImageData, { quality });
+        outputMimeType = "image/webp";
+        console.log(`Encoded as WebP with quality ${quality}`);
+      } catch (webpError) {
+        console.warn(`WebP encoding failed, falling back to JPEG:`, webpError);
+        encoded = await encodeJpeg(resizedImageData, { quality });
+        outputMimeType = "image/jpeg";
+        console.log(`Encoded as JPEG with quality ${quality}`);
+      }
+    } else {
+      encoded = await encodeJpeg(resizedImageData, { quality });
+      outputMimeType = "image/jpeg";
+      console.log(`Encoded as JPEG with quality ${quality}`);
+    }
+    
+    // Check if optimization was successful
+    if (encoded.byteLength < imageData.byteLength * 0.95) {
+      const reduction = Math.round((1 - encoded.byteLength / imageData.byteLength) * 100);
+      console.log(`✅ Image optimized: ${imageData.byteLength} -> ${encoded.byteLength} bytes (${reduction}% reduction)`);
+      return { data: encoded, mimeType: outputMimeType };
+    }
+    
+    // If not significantly smaller, return original
+    console.log(`Optimization didn't reduce size enough, using original`);
+    return { data: imageData, mimeType };
+    
   } catch (error) {
     console.warn(`Image optimization failed, using original:`, error);
-    // Clean up temp file on error
-    await bucket.delete(tempKey).catch(() => {});
-    return imageData;
+    return { data: imageData, mimeType };
   }
 }
 
@@ -438,9 +507,6 @@ export async function processImagesFromFolder(
         
         console.log(`Optimizing ${file.name} (${sizeMB}MB): width=${resizeParams.maxWidth}, height=${resizeParams.maxHeight}, quality=${resizeParams.quality}`);
         
-        // Generate temporary key for optimization
-        const tempKey = `temp/${tableId}/${rowId}/${Date.now()}-${file.id}`;
-        
         const targetSize = 1024 * 1024; // 1MB target
         let currentParams = { ...resizeParams };
         let attempts = 0;
@@ -449,20 +515,18 @@ export async function processImagesFromFolder(
         try {
           do {
             attempts++;
-            const tempKeyAttempt = `${tempKey}-attempt${attempts}`;
             
-            optimizedData = await optimizeImage(
+            const result = await optimizeImage(
               imageData,
               file.mimeType,
               currentParams.maxWidth,
               currentParams.maxHeight,
               currentParams.quality,
-              bucket,
-              tempKeyAttempt,
-              r2PublicDomain,
               originalSize
             );
             
+            optimizedData = result.data;
+            optimizedMimeType = result.mimeType;
             optimizedSize = optimizedData.byteLength;
             
             // Check if we've reached target size (< 1MB)
@@ -481,42 +545,18 @@ export async function processImagesFromFolder(
             } else {
               // Max attempts reached or can't optimize further
               if (optimizedSize >= targetSize) {
-                console.warn(`Image ${file.name} is ${(optimizedSize / 1024 / 1024).toFixed(2)}MB after ${attempts} attempts (target: <1MB not achieved)`);
+                console.warn(`⚠️  Image ${file.name} is ${(optimizedSize / 1024 / 1024).toFixed(2)}MB after ${attempts} attempts (target: <1MB not achieved)`);
               }
               break;
             }
           } while (attempts < maxAttempts && optimizedSize >= targetSize);
           
-          // Check if optimization was successful and determine mime type
-          if (optimizedData !== imageData) {
-            const optimizedSizeCheck = optimizedData.byteLength;
-            
-            // If optimized is significantly smaller, use it
-            if (optimizedSizeCheck < originalSize * 0.95) {
-              // Check if WebP conversion would be beneficial
-              if (shouldConvertToWebP(file.mimeType) && optimizedSizeCheck < originalSize * 0.8) {
-                optimizedMimeType = "image/webp";
-              } else {
-                optimizedMimeType = file.mimeType; // Keep original format
-              }
-            } else {
-              // Optimization didn't help much, use original
-              optimizedData = imageData;
-              optimizedMimeType = file.mimeType;
-              optimizedSize = originalSize;
-            }
-          } else {
-            optimizedMimeType = file.mimeType;
-          }
         } catch (error) {
           console.warn(`Image optimization failed for ${file.name}, using original:`, error);
           optimizedData = imageData; // Fallback to original on error
           optimizedMimeType = file.mimeType;
           optimizedSize = originalSize;
         }
-        
-        // Final size check
-        optimizedSize = optimizedData.byteLength;
       }
 
       // Check if final image is suspiciously small (< 200KB) and log warning

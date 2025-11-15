@@ -466,7 +466,19 @@ After a sync, verify images are in your R2 bucket:
 - `MAX_IMAGE_HEIGHT` - Maximum image height for optimization (default: 1280)
 - `IMAGE_QUALITY` - JPEG/WebP quality 0-100 (default: 85)
 - `MAX_IMAGE_SIZE` - Recommended maximum file size in bytes (default: 10MB). Files larger than this will receive aggressive optimization but will still be processed.
+- `R2_PUBLIC_DOMAIN` - Public domain for R2 bucket (default: https://img.rent-in-ottawa.ca)
 - `BASEROW_API_URL` - Custom Baserow API URL (for self-hosted instances)
+
+### Image Optimization
+
+The worker uses **open-source WASM-based image processing** (@jsquash) for automatic compression and resizing:
+
+- **Automatic resizing**: Images are resized to fit within max dimensions while maintaining aspect ratio
+- **Format conversion**: JPEG/PNG images are converted to WebP for better compression
+- **Iterative optimization**: Large images are compressed multiple times until under 1MB target size
+- **Smart quality adjustment**: Quality is automatically reduced for very large images (>20MB)
+
+**No paid services required** - all image processing runs directly in the Worker using WebAssembly.
 
 ## Next Steps
 
