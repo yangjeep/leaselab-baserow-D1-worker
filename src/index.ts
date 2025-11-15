@@ -317,13 +317,30 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env,
 
   // Process each row - sync data and images together
   for (const row of items) {
+    // For webhooks, use field names from the actual row data if they differ from API fields
+    // This handles cases where webhook payload uses different field names
+    const rowKeys = Object.keys(row).filter(k => k !== 'id' && k !== 'order');
+    const effectiveFields = fields.map(field => {
+      // Check if field name exists in row data
+      if (rowKeys.includes(field.name)) {
+        return field; // Use API field as-is
+      }
+      // Try case-insensitive match
+      const matchingKey = rowKeys.find(key => key.toLowerCase() === field.name.toLowerCase());
+      if (matchingKey) {
+        console.log(`Field name mismatch in webhook: API has "${field.name}", row has "${matchingKey}" - using row key`);
+        return { ...field, name: matchingKey }; // Use row's field name
+      }
+      return field; // Keep original, will be handled in syncRowToD1
+    });
+    
     await syncRowWithImages(
       env.D1_DATABASE,
       env.R2_BUCKET,
       env,
       d1TableName,
       row,
-      fields,
+      effectiveFields,
       imageFields,
       tableId
     );
@@ -354,10 +371,26 @@ async function handleRowsUpdated(
   for (const row of items) {
     const oldRow = oldItems.find((r) => r.id === row.id);
     
+    // For webhooks, use field names from the actual row data if they differ from API fields
+    const rowKeys = Object.keys(row).filter(k => k !== 'id' && k !== 'order');
+    const effectiveFields = fields.map(field => {
+      if (rowKeys.includes(field.name)) {
+        return field;
+      }
+      const matchingKey = rowKeys.find(key => key.toLowerCase() === field.name.toLowerCase());
+      if (matchingKey) {
+        console.log(`Field name mismatch in webhook: API has "${field.name}", row has "${matchingKey}" - using row key`);
+        return { ...field, name: matchingKey };
+      }
+      return field;
+    });
+    
     // Check if image fields changed - if so, we need to process images
     const imageFieldsToProcess = imageFields.filter((field) => {
-      const newValue = row[field.name];
-      const oldValue = oldRow?.[field.name];
+      // Try to find the actual field name in row data
+      const actualFieldName = effectiveFields.find(f => f.id === field.id)?.name || field.name;
+      const newValue = row[actualFieldName];
+      const oldValue = oldRow?.[actualFieldName];
       return newValue && newValue !== oldValue && typeof newValue === "string";
     });
 
@@ -368,7 +401,7 @@ async function handleRowsUpdated(
       env,
       d1TableName,
       row,
-      fields,
+      effectiveFields,
       imageFieldsToProcess,
       tableId
     );
@@ -439,6 +472,11 @@ async function syncRowToD1(
   fields: BaserowField[]
 ): Promise<void> {
   try {
+    // Debug: Log field names and row keys for troubleshooting
+    const fieldNames = fields.map(f => f.name);
+    const rowKeys = Object.keys(row);
+    console.log(`Syncing row ${row.id} - Fields: [${fieldNames.join(", ")}], Row keys: [${rowKeys.join(", ")}]`);
+    
     const columns: string[] = ["id"];
     const values: any[] = [row.id];
 
@@ -446,7 +484,24 @@ async function syncRowToD1(
 
     for (const field of fields) {
       const columnName = sanitizeFieldName(field.name);
+      
+      // Try to get value - handle case sensitivity and field name variations
+      // First try exact match, then case-insensitive match
       let value = row[field.name];
+      if (value === undefined) {
+        // Try case-insensitive match
+        const rowKeys = Object.keys(row);
+        const matchingKey = rowKeys.find(key => key.toLowerCase() === field.name.toLowerCase());
+        if (matchingKey) {
+          value = row[matchingKey];
+          console.log(`Field name matched (case-insensitive): "${field.name}" -> "${matchingKey}"`);
+        }
+      }
+      
+      // Log if value is still undefined (field might be missing from row data)
+      if (value === undefined) {
+        console.warn(`Field "${field.name}" not found in row ${row.id}. Available keys:`, Object.keys(row));
+      }
 
       columns.push(columnName);
       placeholders.push("?");
