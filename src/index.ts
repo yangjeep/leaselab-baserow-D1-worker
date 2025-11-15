@@ -432,15 +432,25 @@ async function syncRowToD1(
       placeholders.push("?");
 
       // Extract selection values for pets and status fields, ignoring color codes
-      if (field.name === "pets" || field.name === "status") {
+      const isPetsOrStatus = field.name === "pets" || field.name === "status";
+      if (isPetsOrStatus) {
         value = extractSelectionValue(value, field.type);
+        // For multiple_select, convert array to comma-separated string
+        if (Array.isArray(value)) {
+          value = value.join(", ");
+        }
       }
 
-      // Serialize complex types to JSON
+      // Serialize complex types to JSON (but not for pets/status which are stored as plain strings)
       if (value !== null && value !== undefined) {
-        if (typeof value === "object" || Array.isArray(value)) {
+        if (isPetsOrStatus) {
+          // For pets/status, store as plain string (already converted from array if needed)
+          values.push(String(value));
+        } else if (typeof value === "object" || Array.isArray(value)) {
+          // For other complex types, serialize to JSON
           values.push(JSON.stringify(value));
         } else {
+          // For simple values, store as-is
           values.push(value);
         }
       } else {
