@@ -1,6 +1,13 @@
 name = "leaselab-rowbase-rio-sync-worker"
 main = "src/index.ts"
 compatibility_date = "2024-11-13"
+node_compat = true
+
+[build]
+command = ""
+
+[build.upload]
+format = "modules"
 
 # Production Environment (default)
 # D1 Database Binding

@@ -471,15 +471,16 @@ After a sync, verify images are in your R2 bucket:
 
 ### Image Optimization
 
-The worker uses **open-source WASM-based image processing** (@jsquash) for automatic compression and resizing:
+The worker uses **browser-image-compression** for automatic compression and resizing:
 
-- **Supported formats**: JPEG and PNG images (most common camera formats)
+- **Supported formats**: JPEG, PNG, and WebP images
 - **Automatic resizing**: Images are resized to fit within max dimensions while maintaining aspect ratio
-- **Format conversion**: JPEG/PNG images are converted to WebP for better compression
-- **Iterative optimization**: Large images are compressed multiple times until under 1MB target size
+- **Format conversion**: JPEG/PNG images can be converted to WebP for better compression
+- **Target file size**: Optimizes images to be under 1MB
 - **Smart quality adjustment**: Quality is automatically reduced for very large images (>20MB)
+- **Graceful fallback**: If optimization fails, images are uploaded as-is without optimization
 
-**No paid services required** - all image processing runs directly in the Worker using WebAssembly.
+**No paid services required** - all image processing runs directly in the Worker using the browser-image-compression library, which is designed to work in web environments including Cloudflare Workers.
 
 ## Next Steps
 

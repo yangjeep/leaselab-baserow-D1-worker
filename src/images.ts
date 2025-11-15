@@ -1,6 +1,6 @@
 /**
  * Image processing and R2 upload
- * Uses @jsquash WASM-based image processing
+ * Uses browser-image-compression for cross-platform compatibility
  */
 
 import type { DriveFile, Env, ImageSyncRecord } from "./types";
@@ -8,17 +8,7 @@ import { extractDriveFolderId, sanitizeFieldName } from "./utils";
 import { listDriveFiles, downloadDriveFile, getAccessToken } from "./google-drive";
 import { getEnvNumber, getEnvString } from "./utils";
 import { getTableColumns } from "./schema";
-import resize from "@jsquash/resize";
-import { decode as decodeJpeg, encode as encodeJpeg } from "@jsquash/jpeg";
-import { decode as decodePng } from "@jsquash/png";
-import { encode as encodeWebp } from "@jsquash/webp";
-
-// ImageData type for WASM decoders
-interface ImageData {
-  readonly data: Uint8ClampedArray;
-  readonly width: number;
-  readonly height: number;
-}
+import imageCompression from "browser-image-compression";
 
 /**
  * Check if image should be converted to WebP
@@ -76,62 +66,8 @@ function calculateOptimalResizeParams(
 }
 
 /**
- * Decode image from ArrayBuffer to ImageData using WASM-based decoders
- */
-async function decodeImage(imageData: ArrayBuffer, mimeType: string): Promise<ImageData> {
-  console.log(`Decoding image with mimeType: ${mimeType}`);
-  
-  // Use appropriate decoder based on mime type
-  if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
-    return await decodeJpeg(imageData);
-  } else if (mimeType === "image/png") {
-    return await decodePng(imageData);
-  } else {
-    throw new Error(`Unsupported image format: ${mimeType}. Only JPEG and PNG are supported.`);
-  }
-}
-
-/**
- * Calculate optimal dimensions maintaining aspect ratio
- */
-function calculateDimensions(
-  originalWidth: number,
-  originalHeight: number,
-  maxWidth: number,
-  maxHeight: number
-): { width: number; height: number } {
-  let width = originalWidth;
-  let height = originalHeight;
-  
-  // Only resize if image is larger than max dimensions
-  if (width > maxWidth || height > maxHeight) {
-    const aspectRatio = width / height;
-    
-    if (width > height) {
-      width = Math.min(width, maxWidth);
-      height = Math.round(width / aspectRatio);
-    } else {
-      height = Math.min(height, maxHeight);
-      width = Math.round(height * aspectRatio);
-    }
-    
-    // Ensure we don't exceed max dimensions
-    if (width > maxWidth) {
-      width = maxWidth;
-      height = Math.round(width / aspectRatio);
-    }
-    if (height > maxHeight) {
-      height = maxHeight;
-      width = Math.round(height * aspectRatio);
-    }
-  }
-  
-  return { width, height };
-}
-
-/**
- * Optimize image using WASM-based processing (@jsquash)
- * This function decodes, resizes, and re-encodes the image
+ * Optimize image using browser-image-compression
+ * This is a lighter-weight library that works better in Workers
  */
 async function optimizeImage(
   imageData: ArrayBuffer,
@@ -142,56 +78,39 @@ async function optimizeImage(
   originalSize?: number
 ): Promise<{ data: ArrayBuffer; mimeType: string }> {
   try {
-    console.log(`Starting WASM-based optimization: target ${maxWidth}x${maxHeight}, quality ${quality}`);
+    console.log(`Starting image optimization: target ${maxWidth}x${maxHeight}, quality ${quality}`);
     
-    // Decode image to ImageData
-    const imageDataObj = await decodeImage(imageData, mimeType);
-    const originalWidth = imageDataObj.width;
-    const originalHeight = imageDataObj.height;
+    // Convert ArrayBuffer to Blob, then to File (required by browser-image-compression)
+    const blob = new Blob([imageData], { type: mimeType });
+    const file = new File([blob], "image.jpg", { type: mimeType });
     
-    console.log(`Original dimensions: ${originalWidth}x${originalHeight}`);
+    console.log(`Original size: ${(imageData.byteLength / 1024 / 1024).toFixed(2)}MB`);
     
-    // Calculate target dimensions
-    const { width, height } = calculateDimensions(originalWidth, originalHeight, maxWidth, maxHeight);
+    // Configure compression options
+    const options = {
+      maxSizeMB: 1, // Target max 1MB
+      maxWidthOrHeight: Math.max(maxWidth, maxHeight),
+      useWebWorker: false, // Workers don't support Web Workers
+      fileType: shouldConvertToWebP(mimeType) ? "image/webp" : mimeType,
+      initialQuality: quality / 100, // Convert 0-100 to 0-1
+    };
     
-    console.log(`Target dimensions: ${width}x${height}`);
+    // Compress the image
+    const compressedFile = await imageCompression(file, options);
     
-    // Resize if needed
-    let resizedImageData = imageDataObj;
-    if (width !== originalWidth || height !== originalHeight) {
-      resizedImageData = await resize(imageDataObj, {
-        width,
-        height,
-      });
-      console.log(`Resized to ${width}x${height}`);
-    }
+    console.log(`Compressed size: ${(compressedFile.size / 1024 / 1024).toFixed(2)}MB`);
     
-    // Encode to WebP for best compression (or JPEG as fallback)
-    let encoded: ArrayBuffer;
-    let outputMimeType: string;
-    
-    if (shouldConvertToWebP(mimeType)) {
-      try {
-        encoded = await encodeWebp(resizedImageData, { quality });
-        outputMimeType = "image/webp";
-        console.log(`Encoded as WebP with quality ${quality}`);
-      } catch (webpError) {
-        console.warn(`WebP encoding failed, falling back to JPEG:`, webpError);
-        encoded = await encodeJpeg(resizedImageData, { quality });
-        outputMimeType = "image/jpeg";
-        console.log(`Encoded as JPEG with quality ${quality}`);
-      }
-    } else {
-      encoded = await encodeJpeg(resizedImageData, { quality });
-      outputMimeType = "image/jpeg";
-      console.log(`Encoded as JPEG with quality ${quality}`);
-    }
+    // Convert back to ArrayBuffer
+    const compressedArrayBuffer = await compressedFile.arrayBuffer();
     
     // Check if optimization was successful
-    if (encoded.byteLength < imageData.byteLength * 0.95) {
-      const reduction = Math.round((1 - encoded.byteLength / imageData.byteLength) * 100);
-      console.log(`✅ Image optimized: ${imageData.byteLength} -> ${encoded.byteLength} bytes (${reduction}% reduction)`);
-      return { data: encoded, mimeType: outputMimeType };
+    if (compressedArrayBuffer.byteLength < imageData.byteLength * 0.95) {
+      const reduction = Math.round((1 - compressedArrayBuffer.byteLength / imageData.byteLength) * 100);
+      console.log(`✅ Image optimized: ${imageData.byteLength} -> ${compressedArrayBuffer.byteLength} bytes (${reduction}% reduction)`);
+      return { 
+        data: compressedArrayBuffer, 
+        mimeType: compressedFile.type 
+      };
     }
     
     // If not significantly smaller, return original
@@ -199,7 +118,9 @@ async function optimizeImage(
     return { data: imageData, mimeType };
     
   } catch (error) {
-    console.warn(`Image optimization failed, using original:`, error);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.warn(`⚠️  Image optimization failed: ${errorMsg}`);
+    console.log(`Uploading original image without optimization`);
     return { data: imageData, mimeType };
   }
 }
