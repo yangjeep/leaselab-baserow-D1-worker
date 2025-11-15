@@ -16,6 +16,7 @@ export interface Env {
   MAX_IMAGE_HEIGHT?: string;
   IMAGE_QUALITY?: string;
   MAX_IMAGE_SIZE?: string;
+  R2_PUBLIC_DOMAIN?: string;
 }
 
 // Baserow API Types

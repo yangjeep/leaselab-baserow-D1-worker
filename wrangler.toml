@@ -27,6 +27,8 @@ crons = ["0 * * * *"]  # Default: Every hour
 [vars]
 # Airtable configuration (can also be set as secrets for security)
 # AIRTABLE_TABLE_NAME = "Properties"  # Optional, defaults to "Properties"
+# R2 Public Domain (defaults to https://img.rent-in-ottawa.ca if not set)
+# R2_PUBLIC_DOMAIN = "https://img.rent-in-ottawa.ca"
 
 # Secrets (add via: npx wrangler secret put SECRET_NAME)
 # Required:

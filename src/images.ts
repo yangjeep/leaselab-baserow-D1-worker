@@ -221,10 +221,9 @@ export async function processImagesFromFolder(
       });
 
       // Generate R2 public URL
-      // Note: This is a placeholder - you'll need to configure your R2 public URL
-      // For Cloudflare R2, you typically use a custom domain or R2.dev subdomain
-      // Adjust this based on your R2 setup
-      const r2Url = `https://your-r2-domain.com/${r2Key}`;
+      // Uses R2_PUBLIC_DOMAIN env var or defaults to https://img.rent-in-ottawa.ca
+      const r2PublicDomain = getEnvString(env, "R2_PUBLIC_DOMAIN", "https://img.rent-in-ottawa.ca");
+      const r2Url = `${r2PublicDomain}/${r2Key}`;
 
       // Update sync record
       await upsertImageSyncRecord(db, {
