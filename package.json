@@ -10,12 +10,19 @@
     "deploy:prod": "wrangler deploy",
     "deploy:demo": "wrangler deploy --env demo"
   },
-  "keywords": ["cloudflare", "worker", "r2", "google-drive"],
+  "keywords": [
+    "cloudflare",
+    "worker",
+    "r2",
+    "google-drive"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
     "wrangler": "^3.84.1"
+  },
+  "dependencies": {
+    "@squoosh/lib": "^0.3.1"
   }
 }
-

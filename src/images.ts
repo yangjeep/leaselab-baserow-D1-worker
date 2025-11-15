@@ -10,6 +10,96 @@ import { getEnvNumber, getEnvString } from "./utils";
 import { getTableColumns } from "./schema";
 
 /**
+ * Check if image should be converted to WebP
+ */
+function shouldConvertToWebP(mimeType: string): boolean {
+  // Convert JPEG and PNG to WebP for better compression
+  return mimeType === "image/jpeg" || mimeType === "image/png";
+}
+
+/**
+ * Optimize image using Cloudflare's Image Resizing API
+ * This function uploads the image to a temporary R2 location, uses the
+ * Image Resizing API to get an optimized version, then returns it
+ */
+async function optimizeImage(
+  imageData: ArrayBuffer,
+  mimeType: string,
+  maxWidth: number,
+  maxHeight: number,
+  quality: number,
+  bucket: R2Bucket,
+  tempKey: string,
+  r2PublicDomain: string
+): Promise<ArrayBuffer> {
+  try {
+    // Step 1: Upload original to temporary R2 location
+    await bucket.put(tempKey, imageData, {
+      httpMetadata: {
+        contentType: mimeType,
+      },
+    });
+    
+    // Step 2: Use Cloudflare Image Resizing API to get optimized version
+    // The Image Resizing API is available at: /cdn-cgi/image/
+    // Note: This requires the R2 public domain to be on Cloudflare
+    const resizeUrl = `${r2PublicDomain}/cdn-cgi/image/width=${maxWidth},height=${maxHeight},quality=${quality},format=auto/${tempKey}`;
+    
+    // Fetch optimized version with timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
+    try {
+      const response = await fetch(resizeUrl, {
+        headers: {
+          'Accept': 'image/webp,image/*',
+        },
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        console.warn(`Image Resizing API failed, using original. Status: ${response.status}`);
+        // Clean up temp file
+        await bucket.delete(tempKey).catch(() => {});
+        return imageData;
+      }
+      
+      const optimizedData = await response.arrayBuffer();
+      
+      // Step 3: Clean up temporary file
+      await bucket.delete(tempKey).catch(() => {});
+      
+      // Return optimized version if it's actually smaller (at least 5% reduction)
+      if (optimizedData.byteLength < imageData.byteLength * 0.95) {
+        console.log(`Image optimized: ${imageData.byteLength} -> ${optimizedData.byteLength} bytes (${Math.round((1 - optimizedData.byteLength / imageData.byteLength) * 100)}% reduction)`);
+        return optimizedData;
+      }
+      
+      // If optimized isn't significantly smaller, return original
+      console.log(`Image optimization didn't reduce size enough, using original`);
+      return imageData;
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        console.warn(`Image Resizing API timeout, using original`);
+      } else {
+        console.warn(`Image Resizing API error, using original:`, fetchError);
+      }
+      // Clean up temp file on error
+      await bucket.delete(tempKey).catch(() => {});
+      return imageData;
+    }
+  } catch (error) {
+    console.warn(`Image optimization failed, using original:`, error);
+    // Clean up temp file on error
+    await bucket.delete(tempKey).catch(() => {});
+    return imageData;
+  }
+}
+
+/**
  * Get R2 object hash from metadata
  */
 export async function getR2ObjectHash(bucket: R2Bucket, key: string): Promise<string | null> {
@@ -227,18 +317,65 @@ export async function processImagesFromFolder(
         continue;
       }
 
-      // TODO: Add image optimization/compression here
-      // For now, we'll just upload the original
-      // In the future, this should:
-      // - Resize if needed (based on MAX_IMAGE_WIDTH/MAX_IMAGE_HEIGHT)
-      // - Compress JPEG/PNG
-      // - Convert to WebP if beneficial
-      // - Strip EXIF metadata
-      const optimizedData = imageData; // Placeholder - no optimization yet
+      // Image optimization/compression
+      const maxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1920);
+      const maxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1920);
+      const quality = getEnvNumber(env, "IMAGE_QUALITY", 85);
+      const r2PublicDomain = getEnvString(env, "R2_PUBLIC_DOMAIN", "https://img.rent-in-ottawa.ca");
+      
+      let optimizedData: ArrayBuffer;
+      let optimizedMimeType: string = file.mimeType;
+      
+      // Generate temporary key for optimization
+      const tempKey = `temp/${tableId}/${rowId}/${Date.now()}-${file.id}`;
+      
+      try {
+        optimizedData = await optimizeImage(
+          imageData,
+          file.mimeType,
+          maxWidth,
+          maxHeight,
+          quality,
+          bucket,
+          tempKey,
+          r2PublicDomain
+        );
+        
+        // Check if optimization was successful and determine mime type
+        if (optimizedData !== imageData) {
+          const originalSize = imageData.byteLength;
+          const optimizedSize = optimizedData.byteLength;
+          
+          // If optimized is significantly smaller, use it
+          if (optimizedSize < originalSize * 0.95) {
+            // Check if WebP conversion would be beneficial
+            if (shouldConvertToWebP(file.mimeType) && optimizedSize < originalSize * 0.8) {
+              optimizedMimeType = "image/webp";
+            } else {
+              optimizedMimeType = file.mimeType; // Keep original format
+            }
+          } else {
+            // Optimization didn't help much, use original
+            optimizedData = imageData;
+            optimizedMimeType = file.mimeType;
+          }
+        } else {
+          optimizedMimeType = file.mimeType;
+        }
+      } catch (error) {
+        console.warn(`Image optimization failed for ${file.name}, using original:`, error);
+        optimizedData = imageData; // Fallback to original on error
+        optimizedMimeType = file.mimeType;
+      }
+      
       const optimizedSize = optimizedData.byteLength;
 
-      // Generate R2 key
-      const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      // Generate R2 key - update extension if converted to WebP
+      let sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      if (optimizedMimeType === "image/webp" && !sanitizedFilename.toLowerCase().endsWith(".webp")) {
+        // Replace extension with .webp
+        sanitizedFilename = sanitizedFilename.replace(/\.[^.]+$/, ".webp");
+      }
       const r2Key = `${tableId}/${rowId}/${sanitizedFilename}`;
 
       // Upload to R2
@@ -253,14 +390,12 @@ export async function processImagesFromFolder(
 
       await bucket.put(r2Key, optimizedData, {
         httpMetadata: {
-          contentType: file.mimeType,
+          contentType: optimizedMimeType,
         },
         customMetadata,
       });
 
       // Generate R2 public URL
-      // Uses R2_PUBLIC_DOMAIN env var or defaults to https://img.rent-in-ottawa.ca
-      const r2PublicDomain = getEnvString(env, "R2_PUBLIC_DOMAIN", "https://img.rent-in-ottawa.ca");
       const r2Url = `${r2PublicDomain}/${r2Key}`;
 
       // Update sync record
