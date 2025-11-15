@@ -308,7 +308,18 @@ export async function processImagesFromFolder(
 
   // Update the row in the D1 table with R2 URLs if table name is provided
   if (tableName && r2Urls.length > 0) {
-    await updateRowWithR2Urls(db, tableName, rowId, fieldName, r2Urls);
+    try {
+      await updateRowWithR2Urls(db, tableName, rowId, fieldName, r2Urls);
+      console.log(`Successfully wrote back ${r2Urls.length} R2 URLs to ${tableName} for row ${rowId}, field ${fieldName}`);
+    } catch (error) {
+      console.error(`Failed to write back R2 URLs to ${tableName} for row ${rowId}, field ${fieldName}:`, error);
+      // Don't throw - images were processed successfully, write-back failure is logged
+      // But we should still return the URLs so they're available
+    }
+  } else if (!tableName) {
+    console.warn(`No table name provided, skipping R2 URL write-back for row ${rowId}, field ${fieldName}`);
+  } else if (r2Urls.length === 0) {
+    console.log(`No R2 URLs to write back for row ${rowId}, field ${fieldName}`);
   }
 
   return r2Urls;
@@ -327,26 +338,51 @@ export async function updateRowWithR2Urls(
   try {
     // Create column name for R2 URLs (e.g., "image_r2_urls")
     const r2UrlsColumnName = sanitizeFieldName(`${fieldName}_r2_urls`);
+    console.log(`Updating R2 URLs for row ${rowId} in ${tableName}, column: ${r2UrlsColumnName}, URLs: ${r2Urls.length}`);
     
     // Check if column exists, if not add it
     const columns = await getTableColumns(db, tableName);
+    console.log(`Existing columns in ${tableName}:`, columns);
+    
     if (!columns.includes(r2UrlsColumnName)) {
       console.log(`Adding column ${r2UrlsColumnName} to ${tableName}`);
-      await db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${r2UrlsColumnName} TEXT`).run();
+      const alterResult = await db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${r2UrlsColumnName} TEXT`).run();
+      if (!alterResult.success) {
+        throw new Error(`Failed to add column ${r2UrlsColumnName} to ${tableName}`);
+      }
+      console.log(`Successfully added column ${r2UrlsColumnName} to ${tableName}`);
+    } else {
+      console.log(`Column ${r2UrlsColumnName} already exists in ${tableName}`);
     }
     
     // Update the row with R2 URLs as JSON array
     const r2UrlsJson = JSON.stringify(r2Urls);
-    await db.prepare(`
+    const updateResult = await db.prepare(`
       UPDATE ${tableName} 
       SET ${r2UrlsColumnName} = ?, updated_at = datetime('now')
       WHERE id = ?
     `).bind(r2UrlsJson, rowId).run();
     
-    console.log(`Updated row ${rowId} in ${tableName} with ${r2Urls.length} R2 URLs for field ${fieldName}`);
+    if (!updateResult.success) {
+      throw new Error(`Failed to update row ${rowId} with R2 URLs`);
+    }
+    
+    // Verify the update worked
+    const verifyResult = await db.prepare(`
+      SELECT ${r2UrlsColumnName} FROM ${tableName} WHERE id = ?
+    `).bind(rowId).first<{ [key: string]: string | null }>();
+    
+    if (verifyResult && verifyResult[r2UrlsColumnName]) {
+      console.log(`Successfully updated row ${rowId} in ${tableName} with ${r2Urls.length} R2 URLs for field ${fieldName}`);
+      console.log(`Verified R2 URLs in column ${r2UrlsColumnName}:`, verifyResult[r2UrlsColumnName]);
+    } else {
+      console.warn(`Warning: R2 URLs update may not have persisted for row ${rowId} in ${tableName}`);
+    }
   } catch (error) {
-    console.error(`Error updating row ${rowId} with R2 URLs:`, error);
-    // Don't throw - this is not critical for the sync process
+    console.error(`Error updating row ${rowId} with R2 URLs in ${tableName}:`, error);
+    console.error(`Error details:`, error instanceof Error ? error.stack : String(error));
+    // Re-throw to surface the error - this is important for sync
+    throw error;
   }
 }
 
