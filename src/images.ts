@@ -1,6 +1,12 @@
 /**
  * Image processing and R2 upload
  * Uploads original images to R2 for on-demand transformation via Cloudflare Image Resizing
+ * 
+ * This module handles:
+ * - Downloading images from Google Drive
+ * - Uploading originals to R2
+ * - Generating optimized URLs with Cloudflare Image Resizing parameters
+ * - Tracking sync status in D1 database
  */
 
 import type { DriveFile, Env, ImageSyncRecord } from "./types";
@@ -8,61 +14,6 @@ import { extractDriveFolderId, sanitizeFieldName } from "./utils";
 import { listDriveFiles, downloadDriveFile, getAccessToken } from "./google-drive";
 import { getEnvNumber, getEnvString } from "./utils";
 import { getTableColumns } from "./schema";
-
-/**
- * Check if image should be converted to WebP
- */
-function shouldConvertToWebP(mimeType: string): boolean {
-  // Convert JPEG and PNG to WebP for better compression
-  return mimeType === "image/jpeg" || mimeType === "image/png";
-}
-
-/**
- * Calculate optimal resize parameters based on image size
- * Larger images get more aggressive resizing and lower quality
- */
-function calculateOptimalResizeParams(
-  originalSize: number,
-  baseMaxWidth: number,
-  baseMaxHeight: number,
-  baseQuality: number
-): { maxWidth: number; maxHeight: number; quality: number } {
-  const sizeMB = originalSize / (1024 * 1024);
-  
-  // For very large images (>20MB), use aggressive settings
-  if (sizeMB > 20) {
-    return {
-      maxWidth: Math.floor(baseMaxWidth * 0.6), // 60% of base width
-      maxHeight: Math.floor(baseMaxHeight * 0.6), // 60% of base height
-      quality: Math.max(70, baseQuality - 15), // Lower quality by 15, min 70
-    };
-  }
-  
-  // For large images (10-20MB), use moderate settings
-  if (sizeMB > 10) {
-    return {
-      maxWidth: Math.floor(baseMaxWidth * 0.75), // 75% of base width
-      maxHeight: Math.floor(baseMaxHeight * 0.75), // 75% of base height
-      quality: Math.max(75, baseQuality - 10), // Lower quality by 10, min 75
-    };
-  }
-  
-  // For medium images (5-10MB), use slightly reduced settings
-  if (sizeMB > 5) {
-    return {
-      maxWidth: Math.floor(baseMaxWidth * 0.85), // 85% of base width
-      maxHeight: Math.floor(baseMaxHeight * 0.85), // 85% of base height
-      quality: Math.max(80, baseQuality - 5), // Lower quality by 5, min 80
-    };
-  }
-  
-  // For smaller images (<5MB), use base settings
-  return {
-    maxWidth: baseMaxWidth,
-    maxHeight: baseMaxHeight,
-    quality: baseQuality,
-  };
-}
 
 /**
  * Generate optimized image URL using Cloudflare Image Resizing
@@ -75,10 +26,27 @@ function generateOptimizedImageUrl(
   quality: number,
   format: 'auto' | 'webp' | 'avif' | 'json' = 'auto'
 ): string {
+  // If already has cdn-cgi/image in it, return as-is
+  if (baseUrl.includes('/cdn-cgi/image/')) {
+    return baseUrl;
+  }
+  
   // Cloudflare Image Resizing URL format:
   // https://domain.com/cdn-cgi/image/width=800,height=600,quality=85,format=auto/image-path
   const params = `width=${maxWidth},height=${maxHeight},quality=${quality},fit=scale-down,format=${format}`;
   return baseUrl.replace(/^(https?:\/\/[^/]+)(.+)$/, `$1/cdn-cgi/image/${params}$2`);
+}
+
+/**
+ * Convert existing R2 URLs to optimized URLs
+ */
+export function convertToOptimizedUrls(
+  urls: string[],
+  maxWidth: number = 1280,
+  maxHeight: number = 1280,
+  quality: number = 85
+): string[] {
+  return urls.map(url => generateOptimizedImageUrl(url, maxWidth, maxHeight, quality, 'auto'));
 }
 
 /**
@@ -243,7 +211,8 @@ async function tryRecoverFailedImage(
   folderId: string,
   tableId: number,
   rowId: number,
-  fieldName: string
+  fieldName: string,
+  env: Env
 ): Promise<string | null> {
   console.log(`Retrying failed image: ${file.name}`);
   
@@ -257,12 +226,26 @@ async function tryRecoverFailedImage(
     try {
       const r2Object = await bucket.head(existingRecord.r2_key);
       if (r2Object) {
-        console.log(`Found existing R2 file for failed image ${file.name}, reusing URL: ${existingRecord.r2_url}`);
-        // Update status to processed since we found a valid file
+        // Convert existing URL to optimized format if needed
+        const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
+        const baseMaxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
+        const baseQuality = getEnvNumber(env, "IMAGE_QUALITY", 85);
+        
+        const optimizedUrl = generateOptimizedImageUrl(
+          existingRecord.r2_url,
+          baseMaxWidth,
+          baseMaxHeight,
+          baseQuality,
+          'auto'
+        );
+        
+        console.log(`Found existing R2 file for failed image ${file.name}, reusing URL: ${optimizedUrl}`);
+        
+        // Update status to processed and store the optimized URL
         await upsertImageSyncRecord(db, {
           google_drive_file_id: file.id,
           google_drive_folder_id: folderId,
-          r2_url: existingRecord.r2_url,
+          r2_url: optimizedUrl,
           r2_key: existingRecord.r2_key,
           table_id: tableId,
           row_id: rowId,
@@ -275,7 +258,7 @@ async function tryRecoverFailedImage(
           md5_hash: file.md5Checksum || existingRecord.md5_hash,
           file_name: file.name,
         });
-        return existingRecord.r2_url;
+        return optimizedUrl;
       }
     } catch (r2CheckError) {
       console.log(`Existing R2 file check failed for ${file.name}, will reprocess:`, r2CheckError);
@@ -286,128 +269,87 @@ async function tryRecoverFailedImage(
 }
 
 /**
- * Download and validate image from Google Drive
+ * Download image from Google Drive
  */
-async function downloadAndValidateImage(
+async function downloadImageFromDrive(
   file: DriveFile,
-  accessToken: string,
-  maxImageSize: number
-): Promise<{ imageData: ArrayBuffer; originalSize: number }> {
-  console.log(`Downloading image ${file.name} (${file.id}) from Google Drive...`);
+  accessToken: string
+): Promise<ArrayBuffer> {
+  console.log(`📥 Downloading ${file.name} from Google Drive...`);
   
-  let imageData: ArrayBuffer;
   try {
-    imageData = await downloadDriveFile(file.id, accessToken);
-    console.log(`Successfully downloaded ${file.name}, size: ${imageData.byteLength} bytes`);
-  } catch (downloadError) {
-    console.error(`Failed to download ${file.name} from Google Drive:`, downloadError);
-    throw new Error(`Download failed: ${downloadError instanceof Error ? downloadError.message : String(downloadError)}`);
+    const imageData = await downloadDriveFile(file.id, accessToken);
+    const sizeMB = (imageData.byteLength / (1024 * 1024)).toFixed(2);
+    console.log(`✓ Downloaded ${file.name} (${sizeMB}MB)`);
+    return imageData;
+  } catch (error) {
+    console.error(`✗ Failed to download ${file.name}:`, error);
+    throw new Error(`Download failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  
-  const originalSize = imageData.byteLength;
-  const maxImageSizeMB = (maxImageSize / (1024 * 1024)).toFixed(2);
-  const originalSizeMB = (originalSize / (1024 * 1024)).toFixed(2);
-  console.log(`Checking file size for ${file.name}: ${originalSizeMB}MB (recommended max: ${maxImageSizeMB}MB)`);
-
-  // Warn if large but proceed with aggressive optimization
-  if (originalSize > maxImageSize) {
-    console.warn(`⚠️  Large image detected: ${file.name} is ${originalSizeMB}MB (exceeds recommended ${maxImageSizeMB}MB). Will apply aggressive resizing and compression.`);
-  } else {
-    console.log(`File size check passed for ${file.name}, proceeding with processing...`);
-  }
-  
-  return { imageData, originalSize };
 }
 
 /**
- * Skip optimization and return original image
- * Image processing libraries don't work reliably in Cloudflare Workers
- * Instead, use Cloudflare Image Resizing at delivery time via URL parameters
- */
-async function optimizeImageIteratively(
-  file: DriveFile,
-  imageData: ArrayBuffer,
-  originalSize: number,
-  env: Env
-): Promise<{ data: ArrayBuffer; mimeType: string; size: number }> {
-  const sizeMB = (originalSize / (1024 * 1024)).toFixed(2);
-  console.log(`Uploading ${file.name} (${sizeMB}MB) as original - optimization will be done on-demand via Cloudflare Image Resizing`);
-  
-  // Return original image without processing
-  return { data: imageData, mimeType: file.mimeType, size: originalSize };
-}
-
-/**
- * Upload optimized image to R2
+ * Upload original image to R2 and generate optimized URL
  */
 async function uploadImageToR2(
   file: DriveFile,
-  optimizedData: ArrayBuffer,
-  optimizedMimeType: string,
-  optimizedSize: number,
+  imageData: ArrayBuffer,
   bucket: R2Bucket,
   env: Env,
   tableId: number,
   rowId: number
 ): Promise<{ r2Url: string; r2Key: string }> {
-  // Check if final image is suspiciously small
-  const minSizeThreshold = 200 * 1024; // 200KB
-  if (optimizedSize < minSizeThreshold) {
-    console.warn(`⚠️  Warning: Image ${file.name} is very small (${(optimizedSize / 1024).toFixed(2)}KB), which may indicate an issue with optimization or the source image`);
-  }
-  
-  // Generate R2 key
-  let sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  if (optimizedMimeType === "image/webp" && !sanitizedFilename.toLowerCase().endsWith(".webp")) {
-    sanitizedFilename = sanitizedFilename.replace(/\.[^.]+$/, ".webp");
-  }
+  // Generate R2 key - keep original filename
+  const sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const r2Key = `${tableId}/${rowId}/${sanitizedFilename}`;
-  const finalSizeMB = (optimizedSize / 1024 / 1024).toFixed(2);
-  console.log(`Uploading ${file.name} to R2 with key: ${r2Key}, size: ${finalSizeMB}MB (${(optimizedSize / 1024).toFixed(2)}KB), mimeType: ${optimizedMimeType}`);
+  const sizeMB = (imageData.byteLength / (1024 * 1024)).toFixed(2);
+  
+  console.log(`☁️  Uploading ${file.name} (${sizeMB}MB) to R2: ${r2Key}`);
 
-  // Upload to R2
+  // Prepare metadata
   const customMetadata: Record<string, string> = {
     "x-drive-file-id": file.id,
     "x-synced-at": new Date().toISOString(),
+    "x-original-size": imageData.byteLength.toString(),
   };
 
   if (file.md5Checksum) {
     customMetadata["x-hash-md5"] = file.md5Checksum;
   }
 
+  // Upload to R2
   try {
-    await bucket.put(r2Key, optimizedData, {
+    await bucket.put(r2Key, imageData, {
       httpMetadata: {
-        contentType: optimizedMimeType,
+        contentType: file.mimeType,
       },
       customMetadata,
     });
-    console.log(`Successfully uploaded ${file.name} to R2: ${r2Key}`);
-  } catch (uploadError) {
-    console.error(`Failed to upload ${file.name} to R2:`, uploadError);
-    throw new Error(`R2 upload failed: ${uploadError instanceof Error ? uploadError.message : String(uploadError)}`);
+    console.log(`✓ Uploaded ${file.name} to R2`);
+  } catch (error) {
+    console.error(`✗ R2 upload failed for ${file.name}:`, error);
+    throw new Error(`R2 upload failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // Generate optimized URL with Cloudflare Image Resizing parameters
   const r2PublicDomain = getEnvString(env, "R2_PUBLIC_DOMAIN", "https://img.rent-in-ottawa.ca");
   const originalUrl = `${r2PublicDomain}/${r2Key}`;
   
-  // Generate optimized URL with Cloudflare Image Resizing parameters
-  // These URLs will serve optimized versions when Image Resizing is enabled
-  const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
-  const baseMaxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
-  const baseQuality = getEnvNumber(env, "IMAGE_QUALITY", 85);
+  const maxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
+  const maxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
+  const quality = getEnvNumber(env, "IMAGE_QUALITY", 85);
   
-  const r2Url = generateOptimizedImageUrl(
+  const optimizedUrl = generateOptimizedImageUrl(
     originalUrl,
-    baseMaxWidth,
-    baseMaxHeight,
-    baseQuality,
+    maxWidth,
+    maxHeight,
+    quality,
     'auto'
   );
   
-  console.log(`Generated optimized URL: ${r2Url}`);
+  console.log(`🔗 Generated optimized URL with dimensions ${maxWidth}x${maxHeight}, quality ${quality}`);
   
-  return { r2Url, r2Key };
+  return { r2Url: optimizedUrl, r2Key };
 }
 
 /**
@@ -422,20 +364,22 @@ async function processSingleImage(
   env: Env,
   tableId: number,
   rowId: number,
-  fieldName: string,
-  maxImageSize: number
+  fieldName: string
 ): Promise<string | null> {
   try {
+    console.log(`\n📸 Processing ${file.name}...`);
+    
     // Check if already processed
     const existingRecord = await getImageSyncRecord(db, file.id);
     
     if (existingRecord && existingRecord.status === "processed") {
       const syncCheck = await shouldResyncImage(existingRecord, file, bucket);
       if (syncCheck.canReuseUrl && syncCheck.existingUrl) {
+        console.log(`✓ Using existing URL for ${file.name}`);
         return syncCheck.existingUrl;
       }
       if (syncCheck.needsResync) {
-        console.log(`Resyncing image: ${file.name}`);
+        console.log(`🔄 Resyncing ${file.name}`);
       }
     }
     
@@ -449,30 +393,23 @@ async function processSingleImage(
         folderId,
         tableId,
         rowId,
-        fieldName
+        fieldName,
+        env
       );
       if (recoveredUrl) {
+        console.log(`✓ Recovered ${file.name}`);
         return recoveredUrl;
       }
     }
 
-    // Download and validate
-    const { imageData, originalSize } = await downloadAndValidateImage(
-      file,
-      accessToken,
-      maxImageSize
-    );
+    // Download from Google Drive
+    const imageData = await downloadImageFromDrive(file, accessToken);
+    const originalSize = imageData.byteLength;
 
-    // Optimize
-    const { data: optimizedData, mimeType: optimizedMimeType, size: optimizedSize } = 
-      await optimizeImageIteratively(file, imageData, originalSize, env);
-
-    // Upload to R2
+    // Upload to R2 and generate optimized URL
     const { r2Url, r2Key } = await uploadImageToR2(
       file,
-      optimizedData,
-      optimizedMimeType,
-      optimizedSize,
+      imageData,
       bucket,
       env,
       tableId,
@@ -489,7 +426,7 @@ async function processSingleImage(
       row_id: rowId,
       field_name: fieldName,
       original_size: originalSize,
-      optimized_size: optimizedSize,
+      optimized_size: originalSize, // Same as original since we don't optimize at upload time
       status: "processed",
       processed_at: new Date().toISOString(),
       error_message: null,
@@ -497,13 +434,13 @@ async function processSingleImage(
       file_name: file.name,
     });
 
-    console.log(`Processed image: ${file.name} -> ${r2Key}`);
+    console.log(`✅ Processed ${file.name}`);
     return r2Url;
     
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
-    console.error(`Failed to process image ${file.name}:`, errorMessage);
+    console.error(`❌ Failed to process ${file.name}:`, errorMessage);
     if (errorStack) {
       console.error(`Error stack for ${file.name}:`, errorStack);
     }
@@ -559,12 +496,11 @@ export async function processImagesFromFolder(
   const imageFiles = driveFiles.filter((f) => f.mimeType.startsWith("image/"));
 
   if (imageFiles.length === 0) {
+    console.log(`📂 No images found in folder ${folderId}`);
     return [];
   }
 
-  const maxImageSize = getEnvNumber(env, "MAX_IMAGE_SIZE", 10 * 1024 * 1024);
-  const maxImageSizeMB = (maxImageSize / (1024 * 1024)).toFixed(2);
-  console.log(`Processing images from folder ${folderId} for row ${rowId}, field ${fieldName}. Max image size: ${maxImageSizeMB}MB`);
+  console.log(`📂 Processing ${imageFiles.length} images from folder ${folderId} for row ${rowId}, field ${fieldName}`);
 
   // Process each image
   const r2Urls: string[] = [];
@@ -578,14 +514,15 @@ export async function processImagesFromFolder(
       env,
       tableId,
       rowId,
-      fieldName,
-      maxImageSize
+      fieldName
     );
     
     if (r2Url) {
       r2Urls.push(r2Url);
     }
   }
+
+  console.log(`✨ Processed ${r2Urls.length}/${imageFiles.length} images successfully`);
 
   // Update the row in the D1 table with R2 URLs if table name is provided
   if (tableName && r2Urls.length > 0) {
@@ -636,6 +573,13 @@ export async function updateRowWithR2Urls(
       console.log(`Column ${r2UrlsColumnName} already exists in ${tableName}`);
     }
     
+    // Check if URLs need conversion to optimized format
+    const needsConversion = r2Urls.some(url => !url.includes('/cdn-cgi/image/'));
+    if (needsConversion) {
+      console.log(`Converting ${r2Urls.length} URLs to optimized format`);
+      // Note: r2Urls are already optimized from uploadImageToR2, but keep this for safety
+    }
+    
     // Update the row with R2 URLs as JSON array
     const r2UrlsJson = JSON.stringify(r2Urls);
     const updateResult = await db.prepare(`
@@ -665,6 +609,56 @@ export async function updateRowWithR2Urls(
     // Re-throw to surface the error - this is important for sync
     throw error;
   }
+}
+
+/**
+ * Update existing URLs in database to use optimized format
+ */
+export async function upgradeUrlsToOptimized(
+  db: D1Database,
+  tableName: string,
+  env: Env
+): Promise<{ updated: number; skipped: number }> {
+  const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
+  const baseMaxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
+  const baseQuality = getEnvNumber(env, "IMAGE_QUALITY", 85);
+  
+  // Get all rows with R2 URLs
+  const rows = await db.prepare(`
+    SELECT id, image_folder_url_r2_urls 
+    FROM ${tableName} 
+    WHERE image_folder_url_r2_urls IS NOT NULL
+  `).all<{ id: number; image_folder_url_r2_urls: string }>();
+  
+  let updated = 0;
+  let skipped = 0;
+  
+  for (const row of rows.results || []) {
+    try {
+      const urls = JSON.parse(row.image_folder_url_r2_urls) as string[];
+      
+      // Check if any URL needs conversion
+      if (urls.some(url => !url.includes('/cdn-cgi/image/'))) {
+        const optimizedUrls = convertToOptimizedUrls(urls, baseMaxWidth, baseMaxHeight, baseQuality);
+        const optimizedJson = JSON.stringify(optimizedUrls);
+        
+        await db.prepare(`
+          UPDATE ${tableName} 
+          SET image_folder_url_r2_urls = ?, updated_at = datetime('now')
+          WHERE id = ?
+        `).bind(optimizedJson, row.id).run();
+        
+        console.log(`Updated row ${row.id} with optimized URLs`);
+        updated++;
+      } else {
+        skipped++;
+      }
+    } catch (error) {
+      console.error(`Failed to update row ${row.id}:`, error);
+    }
+  }
+  
+  return { updated, skipped };
 }
 
 /**
