@@ -462,8 +462,8 @@ After a sync, verify images are in your R2 bucket:
 
 ### Optional
 
-- `MAX_IMAGE_WIDTH` - Maximum image width for optimization (default: 1920)
-- `MAX_IMAGE_HEIGHT` - Maximum image height for optimization (default: 1920)
+- `MAX_IMAGE_WIDTH` - Maximum image width for optimization (default: 1280)
+- `MAX_IMAGE_HEIGHT` - Maximum image height for optimization (default: 1280)
 - `IMAGE_QUALITY` - JPEG/WebP quality 0-100 (default: 85)
 - `MAX_IMAGE_SIZE` - Maximum file size to process in bytes (default: 10MB)
 - `BASEROW_API_URL` - Custom Baserow API URL (for self-hosted instances)

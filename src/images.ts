@@ -18,6 +18,53 @@ function shouldConvertToWebP(mimeType: string): boolean {
 }
 
 /**
+ * Calculate optimal resize parameters based on image size
+ * Larger images get more aggressive resizing and lower quality
+ */
+function calculateOptimalResizeParams(
+  originalSize: number,
+  baseMaxWidth: number,
+  baseMaxHeight: number,
+  baseQuality: number
+): { maxWidth: number; maxHeight: number; quality: number } {
+  const sizeMB = originalSize / (1024 * 1024);
+  
+  // For very large images (>20MB), use aggressive settings
+  if (sizeMB > 20) {
+    return {
+      maxWidth: Math.floor(baseMaxWidth * 0.6), // 60% of base width
+      maxHeight: Math.floor(baseMaxHeight * 0.6), // 60% of base height
+      quality: Math.max(70, baseQuality - 15), // Lower quality by 15, min 70
+    };
+  }
+  
+  // For large images (10-20MB), use moderate settings
+  if (sizeMB > 10) {
+    return {
+      maxWidth: Math.floor(baseMaxWidth * 0.75), // 75% of base width
+      maxHeight: Math.floor(baseMaxHeight * 0.75), // 75% of base height
+      quality: Math.max(75, baseQuality - 10), // Lower quality by 10, min 75
+    };
+  }
+  
+  // For medium images (5-10MB), use slightly reduced settings
+  if (sizeMB > 5) {
+    return {
+      maxWidth: Math.floor(baseMaxWidth * 0.85), // 85% of base width
+      maxHeight: Math.floor(baseMaxHeight * 0.85), // 85% of base height
+      quality: Math.max(80, baseQuality - 5), // Lower quality by 5, min 80
+    };
+  }
+  
+  // For smaller images (<5MB), use base settings
+  return {
+    maxWidth: baseMaxWidth,
+    maxHeight: baseMaxHeight,
+    quality: baseQuality,
+  };
+}
+
+/**
  * Optimize image using Cloudflare's Image Resizing API
  * This function uploads the image to a temporary R2 location, uses the
  * Image Resizing API to get an optimized version, then returns it
@@ -30,7 +77,8 @@ async function optimizeImage(
   quality: number,
   bucket: R2Bucket,
   tempKey: string,
-  r2PublicDomain: string
+  r2PublicDomain: string,
+  originalSize?: number
 ): Promise<ArrayBuffer> {
   try {
     // Step 1: Upload original to temporary R2 location
@@ -43,7 +91,14 @@ async function optimizeImage(
     // Step 2: Use Cloudflare Image Resizing API to get optimized version
     // The Image Resizing API is available at: /cdn-cgi/image/
     // Note: This requires the R2 public domain to be on Cloudflare
-    const resizeUrl = `${r2PublicDomain}/cdn-cgi/image/width=${maxWidth},height=${maxHeight},quality=${quality},format=auto/${tempKey}`;
+    // For large images, use fit=scale-down to only resize if larger than target
+    // Use sharpen=1 for better quality on downscaled images
+    const sizeMB = originalSize ? originalSize / (1024 * 1024) : 0;
+    const fitMode = sizeMB > 10 ? "scale-down" : "inside"; // scale-down for very large images
+    const sharpen = sizeMB > 5 ? 1 : 0; // Sharpen large downscaled images
+    
+    const resizeUrl = `${r2PublicDomain}/cdn-cgi/image/width=${maxWidth},height=${maxHeight},quality=${quality},fit=${fitMode},format=auto${sharpen ? ",sharpen=1" : ""}/${tempKey}`;
+    console.log(`Image Resizing API URL: ${resizeUrl.substring(0, 150)}...`);
     
     // Fetch optimized version with timeout
     const controller = new AbortController();
@@ -241,6 +296,8 @@ export async function processImagesFromFolder(
 
   const r2Urls: string[] = [];
   const maxImageSize = getEnvNumber(env, "MAX_IMAGE_SIZE", 10 * 1024 * 1024); // 10MB default
+  const maxImageSizeMB = (maxImageSize / (1024 * 1024)).toFixed(2);
+  console.log(`Processing images from folder ${folderId} for row ${rowId}, field ${fieldName}. Max image size: ${maxImageSizeMB}MB`);
 
   // Process each image
   for (const file of imageFiles) {
@@ -339,9 +396,14 @@ export async function processImagesFromFolder(
         throw new Error(`Download failed: ${downloadError instanceof Error ? downloadError.message : String(downloadError)}`);
       }
       const originalSize = imageData.byteLength;
+      const maxImageSizeMB = (maxImageSize / (1024 * 1024)).toFixed(2);
+      const originalSizeMB = (originalSize / (1024 * 1024)).toFixed(2);
+      console.log(`Checking file size for ${file.name}: ${originalSizeMB}MB (max: ${maxImageSizeMB}MB)`);
 
       // Check file size
       if (originalSize > maxImageSize) {
+        const errorMsg = `File size ${originalSizeMB}MB (${originalSize} bytes) exceeds maximum ${maxImageSizeMB}MB (${maxImageSize} bytes)`;
+        console.error(`Rejecting ${file.name}: ${errorMsg}`);
         await upsertImageSyncRecord(db, {
           google_drive_file_id: file.id,
           google_drive_folder_id: folderId,
@@ -354,65 +416,90 @@ export async function processImagesFromFolder(
           optimized_size: null,
           status: "failed",
           processed_at: new Date().toISOString(),
-          error_message: `File size ${originalSize} exceeds maximum ${maxImageSize}`,
+          error_message: errorMsg,
           md5_hash: file.md5Checksum || null,
           file_name: file.name,
         });
         continue;
       }
+      
+      console.log(`File size check passed for ${file.name}, proceeding with processing...`);
 
-      // Image optimization/compression
-      const maxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1920);
-      const maxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1920);
-      const quality = getEnvNumber(env, "IMAGE_QUALITY", 85);
+      // Image optimization/compression - base settings (lower defaults)
+      const baseMaxWidth = getEnvNumber(env, "MAX_IMAGE_WIDTH", 1280);
+      const baseMaxHeight = getEnvNumber(env, "MAX_IMAGE_HEIGHT", 1280);
+      const baseQuality = getEnvNumber(env, "IMAGE_QUALITY", 85);
       const r2PublicDomain = getEnvString(env, "R2_PUBLIC_DOMAIN", "https://img.rent-in-ottawa.ca");
+      
+      // Threshold for direct upload without optimization (2MB)
+      const directUploadThreshold = 2 * 1024 * 1024; // 2MB
+      const sizeMB = (originalSize / (1024 * 1024)).toFixed(2);
       
       let optimizedData: ArrayBuffer;
       let optimizedMimeType: string = file.mimeType;
+      let optimizedSize: number;
       
-      // Generate temporary key for optimization
-      const tempKey = `temp/${tableId}/${rowId}/${Date.now()}-${file.id}`;
-      
-      try {
-        optimizedData = await optimizeImage(
-          imageData,
-          file.mimeType,
-          maxWidth,
-          maxHeight,
-          quality,
-          bucket,
-          tempKey,
-          r2PublicDomain
+      // For small images, upload directly to R2 without optimization
+      if (originalSize <= directUploadThreshold) {
+        console.log(`Image ${file.name} (${sizeMB}MB) is small enough, uploading directly to R2 without optimization`);
+        optimizedData = imageData;
+        optimizedMimeType = file.mimeType;
+        optimizedSize = originalSize;
+      } else {
+        // Calculate optimal resize parameters based on image size
+        const resizeParams = calculateOptimalResizeParams(
+          originalSize,
+          baseMaxWidth,
+          baseMaxHeight,
+          baseQuality
         );
         
-        // Check if optimization was successful and determine mime type
-        if (optimizedData !== imageData) {
-          const originalSize = imageData.byteLength;
-          const optimizedSize = optimizedData.byteLength;
+        console.log(`Optimizing ${file.name} (${sizeMB}MB): width=${resizeParams.maxWidth}, height=${resizeParams.maxHeight}, quality=${resizeParams.quality}`);
+        
+        // Generate temporary key for optimization
+        const tempKey = `temp/${tableId}/${rowId}/${Date.now()}-${file.id}`;
+        
+        try {
+          optimizedData = await optimizeImage(
+            imageData,
+            file.mimeType,
+            resizeParams.maxWidth,
+            resizeParams.maxHeight,
+            resizeParams.quality,
+            bucket,
+            tempKey,
+            r2PublicDomain,
+            originalSize
+          );
           
-          // If optimized is significantly smaller, use it
-          if (optimizedSize < originalSize * 0.95) {
-            // Check if WebP conversion would be beneficial
-            if (shouldConvertToWebP(file.mimeType) && optimizedSize < originalSize * 0.8) {
-              optimizedMimeType = "image/webp";
+          // Check if optimization was successful and determine mime type
+          if (optimizedData !== imageData) {
+            const optimizedSizeCheck = optimizedData.byteLength;
+            
+            // If optimized is significantly smaller, use it
+            if (optimizedSizeCheck < originalSize * 0.95) {
+              // Check if WebP conversion would be beneficial
+              if (shouldConvertToWebP(file.mimeType) && optimizedSizeCheck < originalSize * 0.8) {
+                optimizedMimeType = "image/webp";
+              } else {
+                optimizedMimeType = file.mimeType; // Keep original format
+              }
             } else {
-              optimizedMimeType = file.mimeType; // Keep original format
+              // Optimization didn't help much, use original
+              optimizedData = imageData;
+              optimizedMimeType = file.mimeType;
             }
           } else {
-            // Optimization didn't help much, use original
-            optimizedData = imageData;
             optimizedMimeType = file.mimeType;
           }
-        } else {
+        } catch (error) {
+          console.warn(`Image optimization failed for ${file.name}, using original:`, error);
+          optimizedData = imageData; // Fallback to original on error
           optimizedMimeType = file.mimeType;
         }
-      } catch (error) {
-        console.warn(`Image optimization failed for ${file.name}, using original:`, error);
-        optimizedData = imageData; // Fallback to original on error
-        optimizedMimeType = file.mimeType;
+        
+        optimizedSize = optimizedData.byteLength;
       }
-      
-      const optimizedSize = optimizedData.byteLength;
 
       // Generate R2 key - update extension if converted to WebP
       let sanitizedFilename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
