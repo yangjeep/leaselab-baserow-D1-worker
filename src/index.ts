@@ -278,31 +278,18 @@ async function handleRowsCreated(items: BaserowRow[], tableId: number, env: Env,
     console.log("handleRowsCreated: D1 table already exists");
   }
 
-  // Process each row
+  // Process each row - sync data and images together
   for (const row of items) {
-    await syncRowToD1(env.D1_DATABASE, d1TableName, row, fields);
-
-      // Process images from image fields
-      for (const field of imageFields) {
-        const fieldValue = row[field.name];
-        if (fieldValue && typeof fieldValue === "string" && env.R2_BUCKET) {
-          // Process images asynchronously with waitUntil to ensure R2 writes complete
-          ctx.waitUntil(
-            processImagesFromFolder(
-              env.D1_DATABASE,
-              env.R2_BUCKET,
-              env,
-              fieldValue,
-              tableId,
-              row.id,
-              field.name,
-              d1TableName
-            ).catch((error) => {
-              console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
-            })
-          );
-        }
-      }
+    await syncRowWithImages(
+      env.D1_DATABASE,
+      env.R2_BUCKET,
+      env,
+      d1TableName,
+      row,
+      fields,
+      imageFields,
+      tableId
+    );
   }
 }
 
@@ -329,34 +316,28 @@ async function handleRowsUpdated(
 
   const d1TableName = getTableName(tableId, table.name);
 
-  // Process each updated row
+  // Process each updated row - sync data and images together
   for (const row of items) {
-    await syncRowToD1(env.D1_DATABASE, d1TableName, row, fields);
-
-    // Check if image fields changed
     const oldRow = oldItems.find((r) => r.id === row.id);
-    for (const field of imageFields) {
+    
+    // Check if image fields changed - if so, we need to process images
+    const imageFieldsToProcess = imageFields.filter((field) => {
       const newValue = row[field.name];
       const oldValue = oldRow?.[field.name];
+      return newValue && newValue !== oldValue && typeof newValue === "string";
+    });
 
-      if (newValue && newValue !== oldValue && typeof newValue === "string" && env.R2_BUCKET) {
-        // Process images asynchronously with waitUntil to ensure R2 writes complete
-        ctx.waitUntil(
-          processImagesFromFolder(
-            env.D1_DATABASE,
-            env.R2_BUCKET,
-            env,
-            newValue,
-            tableId,
-            row.id,
-            field.name,
-            d1TableName
-          ).catch((error) => {
-            console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
-          })
-        );
-      }
-    }
+    // Sync row data and process images as part of sync operation
+    await syncRowWithImages(
+      env.D1_DATABASE,
+      env.R2_BUCKET,
+      env,
+      d1TableName,
+      row,
+      fields,
+      imageFieldsToProcess,
+      tableId
+    );
   }
 }
 
@@ -489,6 +470,49 @@ async function syncRowToD1(
 }
 
 /**
+ * Sync a single row to D1 and process images (part of sync operation)
+ */
+async function syncRowWithImages(
+  db: D1Database,
+  bucket: R2Bucket | undefined,
+  env: Env,
+  tableName: string,
+  row: BaserowRow,
+  fields: BaserowField[],
+  imageFields: BaserowField[],
+  tableId: number
+): Promise<void> {
+  // First, sync the row data to D1
+  await syncRowToD1(db, tableName, row, fields);
+
+  // Then, process images as part of the sync operation
+  if (bucket && imageFields.length > 0) {
+    for (const field of imageFields) {
+      const fieldValue = row[field.name];
+      if (fieldValue && typeof fieldValue === "string") {
+        try {
+          // Process images synchronously as part of sync
+          await processImagesFromFolder(
+            db,
+            bucket,
+            env,
+            fieldValue,
+            tableId,
+            row.id,
+            field.name,
+            tableName
+          );
+          console.log(`Synced images for row ${row.id}, field ${field.name}`);
+        } catch (error) {
+          console.error(`Error processing images for row ${row.id}, field ${field.name}:`, error);
+          // Don't throw - image processing errors shouldn't fail the sync
+        }
+      }
+    }
+  }
+}
+
+/**
  * Handle full database sync
  */
 async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -594,38 +618,39 @@ async function handleFullSync(env: Env, ctx: ExecutionContext): Promise<Response
         const rows = await fetchAllRows(env, table.id, { user_field_names: true });
         console.log(`Table ${table.name}: ${rows.length} rows`);
 
-        // Sync rows to D1
+        // Sync rows to D1 with images as part of sync operation
         for (const row of rows) {
           try {
-            await syncRowToD1(env.D1_DATABASE, d1TableName, row, fields);
+            await syncRowWithImages(
+              env.D1_DATABASE,
+              env.R2_BUCKET,
+              env,
+              d1TableName,
+              row,
+              fields,
+              imageFields,
+              table.id
+            );
             summary.rowsSucceeded++;
-
-            // Process images asynchronously
+            
+            // Count processed images
             for (const field of imageFields) {
               const fieldValue = row[field.name];
               if (fieldValue && typeof fieldValue === "string" && env.R2_BUCKET) {
-                ctx.waitUntil(
-                  processImagesFromFolder(
-                    env.D1_DATABASE,
-                    env.R2_BUCKET,
-                    env,
-                    fieldValue,
-                    table.id,
-                    row.id,
-                    field.name,
-                    d1TableName
-                  ).then(() => {
-                    summary.imagesProcessed++;
-                  }).catch((error) => {
-                    console.error(`Error processing images:`, error);
-                    summary.imagesFailed++;
-                  })
-                );
+                summary.imagesProcessed++;
               }
             }
           } catch (error) {
             console.error(`Error syncing row ${row.id}:`, error);
             summary.rowsFailed++;
+            
+            // Count failed images
+            for (const field of imageFields) {
+              const fieldValue = row[field.name];
+              if (fieldValue && typeof fieldValue === "string" && env.R2_BUCKET) {
+                summary.imagesFailed++;
+              }
+            }
           }
           summary.rowsProcessed++;
         }
